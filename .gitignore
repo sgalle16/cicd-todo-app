@@ -51,8 +51,10 @@ web_modules/
 # Optional npm cache directory
 .npm
 
-# Optional eslint cache
+# Optional eslint 
 .eslintcache
+eslint-report.json
+eslint-report.*
 
 # Optional stylelint cache
 .stylelintcache
@@ -127,6 +129,7 @@ dist
 
 # Stores VSCode versions used for testing VSCode extensions
 .vscode-test
+.vscode
 
 # yarn v2
 .yarn/cache
@@ -134,3 +137,12 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+
+# Generated Reports
+coverage/
+junit.xml 
+junit-*.xml 
+playwright-report/ 
+eslint-report.json 
+lcov.info 
+test-results/

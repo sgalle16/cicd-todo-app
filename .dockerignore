@@ -21,6 +21,9 @@ eslint.config.mjs
 prettier.config.js 
 .prettierrc*
 sonar-project.properties
+eslint-report.json
+jest.config.js
+jest.setup.js
 
 # Temporary / OS / IDE files
 .DS_Store
