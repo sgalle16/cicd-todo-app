@@ -67,8 +67,9 @@ async function fetchTasks() {
       try {
         const errorData = await response.json();
         errorMsg = errorData.error || errorMsg;
-      } catch (e) {
-        /* Ignore parsing error */
+      } catch (_parseError) {
+        /* Ignore parsing error if response wasn't JSON */
+        console.warn('Could not parse error response as JSON.');
       }
       throw new Error(`Error fetching tasks: ${errorMsg}`);
     }
@@ -100,8 +101,9 @@ async function addTaskAPI(text) {
       try {
         const errorData = await response.json();
         errorMsg = errorData.error || errorMsg;
-      } catch (e) {
-        /* Ignore parsing error */
+      } catch (_parseError) {
+        /* Ignore parsing error if response wasn't JSON */
+        console.warn('Could not parse error response as JSON.');
       }
       throw new Error(errorMsg);
     }
@@ -131,8 +133,9 @@ async function updateTaskAPI(taskId, updates) {
       try {
         const errorData = await response.json();
         errorMsg = errorData.error || errorMsg;
-      } catch (e) {
-        /* Ignore parsing error */
+      } catch (_parseError) {
+        /* Ignore parsing error if response wasn't JSON */
+        console.warn('Could not parse error response as JSON.');
       }
       throw new Error(errorMsg);
     }
@@ -170,8 +173,9 @@ async function deleteTaskAPI(taskId) {
       try {
         const errorData = await response.json();
         errorMsg = errorData.error || errorMsg;
-      } catch (e) {
-        /* Ignore parsing error */
+      } catch (_parseError) {
+        /* Ignore parsing error if response wasn't JSON */
+        console.warn('Could not parse error response as JSON.');
       }
       throw new Error(errorMsg);
     }
@@ -298,7 +302,7 @@ function handleDragStart(event) {
   }
 }
 
-function handleDragEnd(event) {
+function handleDragEnd(_event) {
   draggedTaskElement?.classList.remove('dragging');
   draggedTaskElement = null;
   Object.values(taskContainers).forEach((container) => {
@@ -322,6 +326,7 @@ function handleDragOver(event) {
     });
   }
 }
+
 function handleDragLeave(event) {
   const targetContainer = event.target.closest('.tasks-container');
   const relatedTarget = event.relatedTarget;
@@ -348,7 +353,7 @@ async function handleDrop(event) {
 
       // Optimistic UI Update
       const afterElement = getDragAfterElement(targetContainer, event.clientY);
-      if (afterElement == null) {
+      if (afterElement === null) {
         targetContainer.appendChild(draggedTaskElement);
       } else {
         targetContainer.insertBefore(draggedTaskElement, afterElement);

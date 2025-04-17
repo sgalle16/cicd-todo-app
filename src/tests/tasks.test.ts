@@ -32,11 +32,13 @@ describe('Task API Endpoints', () => {
 
       expect(response.body).toBeInstanceOf(Array);
       expect(response.body.length).toBe(2);
-      expect(response.body[0]).toEqual(expect.objectContaining({
-        id: '1',
-        text: 'Task 1',
-        status: 'todo',
-      }));
+      expect(response.body[0]).toEqual(
+        expect.objectContaining({
+          id: '1',
+          text: 'Task 1',
+          status: 'todo',
+        })
+      );
       expect(response.body[0]).toHaveProperty('createdAt');
       expect(response.body[0]).toHaveProperty('updatedAt');
       expect(mockedTaskService.getAllTasks).toHaveBeenCalledTimes(1);
@@ -77,11 +79,13 @@ describe('Task API Endpoints', () => {
         .expect('Content-Type', /json/)
         .expect(201);
 
-      expect(response.body).toEqual(expect.objectContaining({
-        id: createdTask.id,
-        text: createdTask.text,
-        status: createdTask.status,
-      }));
+      expect(response.body).toEqual(
+        expect.objectContaining({
+          id: createdTask.id,
+          text: createdTask.text,
+          status: createdTask.status,
+        })
+      );
       // Check date properties exist (serialized as strings)
       expect(response.body).toHaveProperty('createdAt');
       expect(response.body).toHaveProperty('updatedAt');
@@ -94,51 +98,51 @@ describe('Task API Endpoints', () => {
 
     // ... (Keep the 400 Bad Request tests for POST as they are, they test input validation before the Task type is relevant) ...
     it('should return 400 Bad Request if text is missing', async () => {
-        const response = await request(app)
-          .post(API_BASE_PATH)
-          .send({}) // Empty body
-          .expect('Content-Type', /json/)
-          .expect(400);
+      const response = await request(app)
+        .post(API_BASE_PATH)
+        .send({}) // Empty body
+        .expect('Content-Type', /json/)
+        .expect(400);
 
-        expect(response.body).toEqual({ error: 'Task text is required and cannot be empty.' });
-        expect(mockedTaskService.createTask).not.toHaveBeenCalled();
+      expect(response.body).toEqual({ error: 'Task text is required and cannot be empty.' });
+      expect(mockedTaskService.createTask).not.toHaveBeenCalled();
     });
 
     it('should return 400 Bad Request if text is empty string', async () => {
-         const response = await request(app)
-          .post(API_BASE_PATH)
-          .send({ text: ' ' }) // Empty text
-          .expect('Content-Type', /json/)
-          .expect(400);
+      const response = await request(app)
+        .post(API_BASE_PATH)
+        .send({ text: ' ' }) // Empty text
+        .expect('Content-Type', /json/)
+        .expect(400);
 
-        expect(response.body).toEqual({ error: 'Task text is required and cannot be empty.' });
-        expect(mockedTaskService.createTask).not.toHaveBeenCalled();
-      });
+      expect(response.body).toEqual({ error: 'Task text is required and cannot be empty.' });
+      expect(mockedTaskService.createTask).not.toHaveBeenCalled();
+    });
 
-       it('should return 400 Bad Request if text is not a string', async () => {
-         const response = await request(app)
-          .post(API_BASE_PATH)
-          .send({ text: 123 }) // Invalid type
-          .expect('Content-Type', /json/)
-          .expect(400);
+    it('should return 400 Bad Request if text is not a string', async () => {
+      const response = await request(app)
+        .post(API_BASE_PATH)
+        .send({ text: 123 }) // Invalid type
+        .expect('Content-Type', /json/)
+        .expect(400);
 
-        expect(response.body).toEqual({ error: 'Task text is required and cannot be empty.' });
-        expect(mockedTaskService.createTask).not.toHaveBeenCalled();
-      });
+      expect(response.body).toEqual({ error: 'Task text is required and cannot be empty.' });
+      expect(mockedTaskService.createTask).not.toHaveBeenCalled();
+    });
 
     it('should return 500 if the service throws an error during creation', async () => {
-        mockedTaskService.createTask.mockImplementation(() => {
-          throw new Error('Failed to save');
-        });
+      mockedTaskService.createTask.mockImplementation(() => {
+        throw new Error('Failed to save');
+      });
 
-        const response = await request(app)
-          .post(API_BASE_PATH)
-          .send({ text: 'Valid text but service fails' })
-          .expect('Content-Type', /json/)
-          .expect(500); // Or 400 if the controller catches specific service errors
+      const response = await request(app)
+        .post(API_BASE_PATH)
+        .send({ text: 'Valid text but service fails' })
+        .expect('Content-Type', /json/)
+        .expect(500); // Or 400 if the controller catches specific service errors
 
-        expect(response.body).toEqual({ error: 'Failed to create task' }); // Adjust expected error based on controller logic
-        expect(mockedTaskService.createTask).toHaveBeenCalledTimes(1);
+      expect(response.body).toEqual({ error: 'Failed to create task' }); // Adjust expected error based on controller logic
+      expect(mockedTaskService.createTask).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -149,11 +153,11 @@ describe('Task API Endpoints', () => {
     const now = new Date();
     const later = new Date(now.getTime() + 1000); // Simulate time passing for update
     const updatedTask: Task = {
-        id: taskId,
-        text: validUpdateData.text,
-        status: validUpdateData.status,
-        createdAt: now, // Assume createdAt remains the original time
-        updatedAt: later, // updatedAt reflects the update time
+      id: taskId,
+      text: validUpdateData.text,
+      status: validUpdateData.status,
+      createdAt: now, // Assume createdAt remains the original time
+      updatedAt: later, // updatedAt reflects the update time
     };
 
     it('should return 200 OK and the updated task matching the Task interface', async () => {
@@ -165,11 +169,13 @@ describe('Task API Endpoints', () => {
         .expect('Content-Type', /json/)
         .expect(200);
 
-      expect(response.body).toEqual(expect.objectContaining({
+      expect(response.body).toEqual(
+        expect.objectContaining({
           id: taskId,
           text: validUpdateData.text,
           status: validUpdateData.status,
-      }));
+        })
+      );
       // Check date properties exist and are strings
       expect(response.body).toHaveProperty('createdAt');
       expect(response.body).toHaveProperty('updatedAt');
@@ -181,61 +187,63 @@ describe('Task API Endpoints', () => {
     });
 
     it('should return 404 Not Found if task ID does not exist', async () => {
-        mockedTaskService.updateTask.mockReturnValue(null); // Service indicates task not found
+      mockedTaskService.updateTask.mockReturnValue(null); // Service indicates task not found
 
-        await request(app)
-          .put(`${API_BASE_PATH}/non-existent-id`)
-          .send({ status: 'done' })
-          .expect('Content-Type', /json/)
-          .expect(404);
+      await request(app)
+        .put(`${API_BASE_PATH}/non-existent-id`)
+        .send({ status: 'done' })
+        .expect('Content-Type', /json/)
+        .expect(404);
 
-        expect(mockedTaskService.updateTask).toHaveBeenCalledWith('non-existent-id', { status: 'done' });
+      expect(mockedTaskService.updateTask).toHaveBeenCalledWith('non-existent-id', {
+        status: 'done',
+      });
+    });
+
+    it('should return 400 Bad Request for invalid status value', async () => {
+      await request(app)
+        .put(`${API_BASE_PATH}/${taskId}`)
+        .send({ status: 'pending' }) // Invalid status
+        .expect('Content-Type', /json/)
+        .expect(400);
+
+      expect(mockedTaskService.updateTask).not.toHaveBeenCalled();
+    });
+
+    it('should return 400 Bad Request if text is not a string', async () => {
+      await request(app)
+        .put(`${API_BASE_PATH}/${taskId}`)
+        .send({ text: false }) // Invalid type
+        .expect('Content-Type', /json/)
+        .expect(400);
+
+      expect(mockedTaskService.updateTask).not.toHaveBeenCalled();
+    });
+
+    it('should return 400 Bad Request if no valid fields are provided', async () => {
+      await request(app)
+        .put(`${API_BASE_PATH}/${taskId}`)
+        .send({ unrelatedField: 123 }) // No 'status' or 'text'
+        .expect('Content-Type', /json/)
+        .expect(400);
+
+      expect(mockedTaskService.updateTask).not.toHaveBeenCalled();
+    });
+
+    it('should return 500 if the service throws an error during update', async () => {
+      mockedTaskService.updateTask.mockImplementation(() => {
+        throw new Error('Update conflict');
       });
 
-      it('should return 400 Bad Request for invalid status value', async () => {
-        await request(app)
-          .put(`${API_BASE_PATH}/${taskId}`)
-          .send({ status: 'pending' }) // Invalid status
-          .expect('Content-Type', /json/)
-          .expect(400);
+      const response = await request(app)
+        .put(`${API_BASE_PATH}/${taskId}`)
+        .send({ text: 'Valid update but service fails' })
+        .expect('Content-Type', /json/)
+        .expect(500);
 
-        expect(mockedTaskService.updateTask).not.toHaveBeenCalled();
-      });
-
-       it('should return 400 Bad Request if text is not a string', async () => {
-        await request(app)
-          .put(`${API_BASE_PATH}/${taskId}`)
-          .send({ text: false }) // Invalid type
-          .expect('Content-Type', /json/)
-          .expect(400);
-
-        expect(mockedTaskService.updateTask).not.toHaveBeenCalled();
-      });
-
-      it('should return 400 Bad Request if no valid fields are provided', async () => {
-        await request(app)
-          .put(`${API_BASE_PATH}/${taskId}`)
-          .send({ unrelatedField: 123 }) // No 'status' or 'text'
-          .expect('Content-Type', /json/)
-          .expect(400);
-
-        expect(mockedTaskService.updateTask).not.toHaveBeenCalled();
-      });
-
-      it('should return 500 if the service throws an error during update', async () => {
-          mockedTaskService.updateTask.mockImplementation(() => {
-              throw new Error('Update conflict');
-          });
-
-          const response = await request(app)
-            .put(`${API_BASE_PATH}/${taskId}`)
-            .send({ text: 'Valid update but service fails' })
-            .expect('Content-Type', /json/)
-            .expect(500);
-
-          expect(response.body).toEqual({ error: 'Update conflict' }); // Error message from the thrown error
-          expect(mockedTaskService.updateTask).toHaveBeenCalledTimes(1);
-      });
+      expect(response.body).toEqual({ error: 'Update conflict' }); // Error message from the thrown error
+      expect(mockedTaskService.updateTask).toHaveBeenCalledTimes(1);
+    });
   });
 
   // --- DELETE /tasks/:id ---
@@ -267,20 +275,20 @@ describe('Task API Endpoints', () => {
     });
 
     it('should return 500 if the service throws an error during deletion', async () => {
-        mockedTaskService.deleteTask.mockImplementation(() => {
-            throw new Error('Deletion restricted');
-        });
+      mockedTaskService.deleteTask.mockImplementation(() => {
+        throw new Error('Deletion restricted');
+      });
 
-        const response = await request(app)
-          // Now correctly uses the taskIdToDelete defined in the describe block
-          .delete(`${API_BASE_PATH}/${taskIdToDelete}`)
-          .expect('Content-Type', /json/) // 500 has a JSON body
-          .expect(500);
+      const response = await request(app)
+        // Now correctly uses the taskIdToDelete defined in the describe block
+        .delete(`${API_BASE_PATH}/${taskIdToDelete}`)
+        .expect('Content-Type', /json/) // 500 has a JSON body
+        .expect(500);
 
-        expect(response.body).toEqual({ error: 'Failed to delete task' });
-        // We expect the service to be called, even if it throws
-        expect(mockedTaskService.deleteTask).toHaveBeenCalledWith(taskIdToDelete);
-        expect(mockedTaskService.deleteTask).toHaveBeenCalledTimes(1);
+      expect(response.body).toEqual({ error: 'Failed to delete task' });
+      // We expect the service to be called, even if it throws
+      expect(mockedTaskService.deleteTask).toHaveBeenCalledWith(taskIdToDelete);
+      expect(mockedTaskService.deleteTask).toHaveBeenCalledTimes(1);
     });
-  }); 
+  });
 });

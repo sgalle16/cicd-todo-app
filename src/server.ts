@@ -30,8 +30,8 @@ app.get('/health', (req: Request, res: Response) => {
 
 // --- Version Check ---
 app.get('/version', (req: Request, res: Response) => {
-    res.status(200).send(version);
-  });
+  res.status(200).send(version);
+});
 
 // --- Base Route for Frontend ---
 // Serve index.html for the root path AFTER API routes
