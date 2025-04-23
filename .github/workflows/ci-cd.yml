@@ -1,0 +1,207 @@
+name: CI/CD Pipeline ToDo App
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # --- Job 1: Lint & Format Check ---
+  lint-format:
+    name: Lint & Format Check
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4.4.0
+        with:
+          node-version: '22.14.0'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Check Formatting (Prettier)
+        # Fails if any file is not formatted
+        run: npm run format:check
+
+      - name: Run ESLint & Generate Report
+        # Fails if any linting error is found and generates a report
+        run: npm run lint:report
+
+      - name: Upload ESLint Report
+        uses: actions/upload-artifact@v4.6.2
+        if: always() # Upload even if lint/format fails
+        with:
+          name: eslint-report
+          path: eslint-report.json
+          retention-days: 1
+
+  # --- Job 2: Build & Unit/Integration Tests ---
+  unit-integration-tests:
+    name: Build & Unit/Integration Tests
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4.4.0
+        with:
+          node-version: '22.14.0'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Build Application (Verify Compilation)
+        run: npm run build
+
+      - name: Run Unit & Integration Tests (Jest) with Coverage
+        # Generates reports in ./coverage/
+        # Fails if any test fails
+        run: npm run test:cov
+
+      - name: Upload Jest Reports
+        uses: actions/upload-artifact@v4.6.2
+        if: always() # Upload even if tests fail
+        with:
+          name: jest-reports
+          path: |
+            coverage/
+            coverage/lcov.info
+            coverage/junit.xml
+          retention-days: 7
+
+      - name: Upload Build Artifact (dist)
+        if: success() # Only if build and tests is successful
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: dist
+          path: dist/
+          retention-days: 1
+
+  # --- Job 3: SonarCloud Analysis ---
+  sonarcloud-analysis:
+    name: SonarCloud Analysis
+    needs: [lint-format, unit-integration-tests]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Download ESLint Report
+        uses: actions/download-artifact@v4.2.1
+        with:
+          name: eslint-report
+
+      - name: Download Jest Reports
+        uses: actions/download-artifact@v4.2.1
+        with:
+          name: jest-reports
+          path: coverage/
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarqube-scan-action@v5.1.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  # --- Job 4: Docker Build, Scan (Trivy) & Push ---
+  docker-build-scan-push:
+    name: Docker Build, Scan & Push
+    needs: [sonarcloud-analysis]
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    outputs:
+      # Outputs needed for subsequent CD jobs
+      repo_name: ${{ steps.set_outputs.outputs.repo_name }}
+      image_name: ${{ steps.set_outputs.outputs.image_name }}
+      image_tag_sha: ${{ steps.set_outputs.outputs.image_tag_sha }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3.6.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3.10.0
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3.4.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Docker Meta # Generate tags and labels
+        id: docker_meta
+        uses: docker/metadata-action@v5.7.0
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}
+          # Standard tags: sha, latest
+          tags: |
+            type=sha,format=short,priority=300
+            # Add 'latest' ONLY for 'main'
+            type=raw,value=latest,enable={{is_default_branch}},priority=100
+
+      - name: Build Docker image and load locally for Trivy
+        id: docker_build
+        uses: docker/build-push-action@v6.15.0
+        with:
+          context: .
+          file: ./Dockerfile
+          tags: ${{ steps.docker_meta.outputs.tags }}
+          labels: ${{ steps.docker_meta.outputs.labels }}
+          load: true # Build image and upload to runner locally
+          push: false # Do not push yet
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          # Scan build image using first tag from docker_meta
+          image-ref: ${{ fromJSON(steps.docker_meta.outputs.json).tags[0] }}
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'HIGH,CRITICAL'
+
+      # This only runs if NO vulnerabilities with high/critical severity are found
+      - name: Push Docker Image to Docker Hub
+        if: success()
+        uses: docker/build-push-action@v6.15.0
+        with:
+          context: .
+          file: ./Dockerfile
+          tags: ${{ steps.docker_meta.outputs.tags }}
+          labels: ${{ steps.docker_meta.outputs.labels }}
+          push: true # Push image now
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Set Job Outputs
+        id: set_outputs
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          echo "Setting outputs..."
+          echo "repo_name=${{ github.event.repository.name }}" >> "$GITHUB_OUTPUT"
+          echo "image_name=${{ secrets.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}" >> "$GITHUB_OUTPUT"
+          echo "image_tag_sha=${{ steps.docker_meta.outputs.version }}" >> "$GITHUB_OUTPUT"
