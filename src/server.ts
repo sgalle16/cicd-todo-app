@@ -2,12 +2,12 @@ import express, { Express, Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import path from 'path';
 import { version } from '../package.json';
-
-// Import routes
 import taskRoutes from './routes/task.routes';
 
+// --- Initialize Express app ---
 const app: Express = express();
-const port = process.env.PORT || 5000;
+const port = process.env.PORT ?? 5000;
+app.disable('x-powered-by'); // Disable 'X-Powered-By' header
 
 // --- Middleware ---
 app.use(cors()); // Enable CORS for all origins (adjust in production)
