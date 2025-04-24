@@ -5,7 +5,7 @@ const APP_BASE_URL = process.env.APP_BASE_URL || 'http://localhost:5000';
 async function addTask(page: Page, taskText: string) {
   await page.locator('#newTaskInput').fill(taskText);
   await page.locator('#addTaskForm button[type="submit"]').click();
-  // Wait for the task card to appear in the todo column
+  // Wait for the task card to appear in the to-do column
   const taskLocator = page.locator(`#todo-tasks .task-card:has-text("${taskText}")`);
   await expect(taskLocator).toBeVisible({ timeout: 10000 }); // Wait longer after add
   return taskLocator;
@@ -80,7 +80,7 @@ test.describe('Kanban Board UI E2E Tests', () => {
     const taskInDoingLocator = page.locator(`#doing-tasks .task-card:has-text("${taskText}")`);
     await expect(taskInDoingLocator).toBeVisible({ timeout: 5000 });
 
-    // Verify it's gone from the 'Todo' column
+    // Verify it's gone from the 'To-do' column
     const taskInTodoLocator = page.locator(`#todo-tasks .task-card:has-text("${taskText}")`);
     await expect(taskInTodoLocator).not.toBeVisible(); // Or .toBeHidden()
   });
