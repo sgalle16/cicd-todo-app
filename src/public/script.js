@@ -35,6 +35,7 @@ function formatDate(dateString) {
   }
 }
 
+// --- Temporary Message Display Function ---
 function showMessage(message, isError) {
   if (isError === void 0) {
     isError = false;
@@ -67,9 +68,11 @@ async function fetchTasks() {
       try {
         const errorData = await response.json();
         errorMsg = errorData.error || errorMsg;
-      } catch (_parseError) {
-        /* Ignore parsing error if response wasn't JSON */
-        console.warn('Could not parse error response as JSON.');
+      } catch (jsonError) {
+        console.warn(
+          'Could not parse error response as JSON for fetchTasks. Using default status text.',
+          jsonError
+        );
       }
       throw new Error(`Error fetching tasks: ${errorMsg}`);
     }
@@ -101,9 +104,11 @@ async function addTaskAPI(text) {
       try {
         const errorData = await response.json();
         errorMsg = errorData.error || errorMsg;
-      } catch (_parseError) {
-        /* Ignore parsing error if response wasn't JSON */
-        console.warn('Could not parse error response as JSON.');
+      } catch (jsonError) {
+        console.warn(
+          'Could not parse error response as JSON for addTaskAPI. Using default status text.',
+          jsonError
+        );
       }
       throw new Error(errorMsg);
     }
@@ -133,9 +138,11 @@ async function updateTaskAPI(taskId, updates) {
       try {
         const errorData = await response.json();
         errorMsg = errorData.error || errorMsg;
-      } catch (_parseError) {
-        /* Ignore parsing error if response wasn't JSON */
-        console.warn('Could not parse error response as JSON.');
+      } catch (jsonError) {
+        console.warn(
+          'Could not parse error response as JSON for updateTaskAPI. Using default status text.',
+          jsonError
+        );
       }
       throw new Error(errorMsg);
     }
@@ -173,9 +180,11 @@ async function deleteTaskAPI(taskId) {
       try {
         const errorData = await response.json();
         errorMsg = errorData.error || errorMsg;
-      } catch (_parseError) {
-        /* Ignore parsing error if response wasn't JSON */
-        console.warn('Could not parse error response as JSON.');
+      } catch (jsonError) {
+        console.warn(
+          'Could not parse error response as JSON for deleteTaskAPI. Using default status text.',
+          jsonError
+        );
       }
       throw new Error(errorMsg);
     }
@@ -190,6 +199,7 @@ async function deleteTaskAPI(taskId) {
 }
 
 // --- DOM Manipulation & Rendering ---
+// Creates a task card HTML element with listeners
 function createTaskElement(task) {
   const taskCard = document.createElement('div');
   taskCard.classList.add('task-card');
@@ -222,6 +232,7 @@ function createTaskElement(task) {
   return taskCard;
 }
 
+// Renders a single task to the board
 function renderTask(task) {
   const container = taskContainers[task.status];
   if (container) {
@@ -232,6 +243,7 @@ function renderTask(task) {
   }
 }
 
+// Clears the board
 function clearBoard() {
   Object.values(taskContainers).forEach(function (container) {
     if (container) {
@@ -240,6 +252,7 @@ function clearBoard() {
   });
 }
 
+// Renders all tasks from the state
 function renderBoard() {
   clearBoard();
   if (tasksState.length === 0) {
@@ -254,6 +267,7 @@ function renderBoard() {
 }
 
 // --- Event Handlers ---
+// Handles form submission for adding new tasks
 function handleAddTaskFormSubmit(event) {
   event.preventDefault();
   if (newTaskInput && newTaskInput.value.trim()) {
@@ -263,6 +277,7 @@ function handleAddTaskFormSubmit(event) {
   }
 }
 
+// Handles clicking the delete button on a task
 async function handleDeleteTask(event) {
   event.stopPropagation();
   const button = event.target;
@@ -336,58 +351,114 @@ function handleDragLeave(event) {
   }
 }
 
+// Main handler for when a task is dropped onto a column
 async function handleDrop(event) {
   event.preventDefault();
-  const targetContainer = event.target.closest('.tasks-container');
-  const taskId = event.dataTransfer?.getData('text/plain');
+  const targetContainer = event.target.closest('.tasks-container'); // Where the task was dropped
+  const taskId = event.dataTransfer?.getData('text/plain'); // ID of the dragged task
 
-  if (targetContainer && taskId && draggedTaskElement) {
-    const newStatus = targetContainer.dataset.columnId; // Type assertion might be needed if TS complains
-    const originalStatus = draggedTaskElement.dataset.status; // Type assertion might be needed
-    const originalContainer = taskContainers[originalStatus];
-
-    targetContainer.classList.remove('drag-over');
-
-    if (newStatus && newStatus !== originalStatus) {
-      console.log(`Task ${taskId} dropped in ${newStatus}. Original: ${originalStatus}`);
-
-      // Optimistic UI Update
-      const afterElement = getDragAfterElement(targetContainer, event.clientY);
-      if (afterElement === null) {
-        targetContainer.appendChild(draggedTaskElement);
-      } else {
-        targetContainer.insertBefore(draggedTaskElement, afterElement);
-      }
-      draggedTaskElement.dataset.status = newStatus;
-
-      // Call API - Pass only the status update
-      const success = await updateTaskAPI(taskId, { status: newStatus });
-
-      // Handle API Failure (Revert UI)
-      if (!success) {
-        showMessage('Error al mover la tarea. Revirtiendo cambio.', true);
-        if (originalContainer && originalStatus) {
-          originalContainer.appendChild(draggedTaskElement); // Append is simpler for revert
-          draggedTaskElement.dataset.status = originalStatus;
-        } else {
-          fetchTasks(); // Fallback
-        }
-      } else {
-        showMessage(
-          `Tarea movida a "${targetContainer.previousElementSibling?.textContent || newStatus}".`,
-          false
-        );
-      }
-    } else {
-      console.log('Task dropped in the same column or invalid drop.');
-    }
+  // Guard clause: Ensure drop is valid
+  if (!targetContainer || !taskId || !draggedTaskElement) {
+    cleanupDragState(); // Ensure cleanup even if drop is invalid
+    return;
   }
-  // Ensure cleanup happens regardless of drop validity
+
+  const newStatus = targetContainer.dataset.columnId;
+  const originalStatus = draggedTaskElement.dataset.status;
+  targetContainer.classList.remove('drag-over'); // Remove highlight
+
+  // Guard clause: Ensure drop is to a different column
+  if (!newStatus || newStatus === originalStatus) {
+    console.log('Task dropped in the same column or invalid drop target.');
+    cleanupDragState();
+    return;
+  }
+
+  console.log(`Task ${taskId} dropped in ${newStatus}. Original: ${originalStatus}`);
+
+  // Optimistic UI update (move element first)
+  const revertUIData = performOptimisticUpdate(
+    targetContainer,
+    draggedTaskElement,
+    newStatus,
+    event.clientY
+  );
+
+  // Call API and handle result
+  const success = await updateTaskAPI(taskId, { status: newStatus });
+
+  // Handle API Result
+  if (success) {
+    showMessage(
+      `Tarea movida a "${targetContainer.previousElementSibling?.textContent || newStatus}".`,
+      false
+    );
+  } else {
+    showMessage('Error al mover la tarea. Revirtiendo cambio.', true);
+    revertOptimisticUpdate(revertUIData); // Revert UI if API failed
+  }
+
+  // Always cleanup drag state in the end
+  cleanupDragState();
+}
+
+// Moves element in DOM optimistically, returns revert data
+function performOptimisticUpdate(targetContainer, taskElement, newStatus, dropY) {
+  const originalStatus = taskElement.dataset.status;
+  const originalContainer = taskContainers[originalStatus];
+
+  // Find insertion point
+  const afterElement = getDragAfterElement(targetContainer, dropY);
+
+  // Store original position for potential revert
+  const revertData = {
+    originalContainer: originalContainer,
+    originalNextSibling: taskElement.nextElementSibling, // Sibling *before* moving
+    originalStatus: originalStatus,
+    movedElement: taskElement,
+  };
+
+  // Move element in DOM
+  if (afterElement === null) {
+    targetContainer.appendChild(taskElement);
+  } else {
+    targetContainer.insertBefore(taskElement, afterElement);
+  }
+  // Update element's dataset
+  taskElement.dataset.status = newStatus;
+
+  return revertData;
+}
+
+//Reverts the optimistic UI update if the API call failed.
+function revertOptimisticUpdate(revertData) {
+  const { originalContainer, originalNextSibling, originalStatus, movedElement } = revertData;
+
+  if (originalContainer && originalStatus) {
+    // Insert back into original position or append if sibling info is lost/complex
+    if (originalNextSibling && originalContainer.contains(originalNextSibling)) {
+      originalContainer.insertBefore(movedElement, originalNextSibling);
+    } else {
+      originalContainer.appendChild(movedElement); // Append is a safe fallback
+    }
+    movedElement.dataset.status = originalStatus; // Revert dataset
+  } else {
+    // Fallback if original container/status is somehow lost
+    console.error('Could not revert UI update, fetching all tasks as fallback.');
+    fetchTasks();
+  }
+}
+
+//Cleans up the global dragging state variables and styles.
+function cleanupDragState() {
   if (draggedTaskElement) {
-    // Check if it exists before removing class
     draggedTaskElement.classList.remove('dragging');
   }
-  draggedTaskElement = null; // Reset state
+  draggedTaskElement = null;
+  // Remove highlight from all containers (just in case)
+  Object.values(taskContainers).forEach((container) => {
+    container?.classList.remove('drag-over');
+  });
 }
 
 // Helper function to find insertion point during drag
