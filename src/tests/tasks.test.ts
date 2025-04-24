@@ -23,13 +23,18 @@ describe('Task API Endpoints', () => {
   // --- GET /tasks ---
   describe('GET ' + API_BASE_PATH, () => {
     it('should return 200 OK and an array of tasks matching the Task interface', async () => {
-      // ... mock setup ...
+      const now = new Date();
+      const mockTasks: Task[] = [
+        { id: '1', text: 'Task 1', status: 'todo', createdAt: now, updatedAt: now },
+        { id: '2', text: 'Task 2', status: 'doing', createdAt: now, updatedAt: now },
+      ];
+      mockedTaskService.getAllTasks.mockReturnValue(mockTasks);
+
       const response = await request(app)
         .get(API_BASE_PATH)
         .expect('Content-Type', /json/)
         .expect(200);
 
-      // Assign to typed variable
       const tasks = response.body as TaskResponse[];
 
       expect(tasks).toBeInstanceOf(Array);
@@ -42,7 +47,9 @@ describe('Task API Endpoints', () => {
         })
       );
       expect(tasks[0]).toHaveProperty('createdAt');
+      expect(typeof tasks[0].createdAt).toBe('string');
       expect(tasks[0]).toHaveProperty('updatedAt');
+      expect(typeof tasks[0].updatedAt).toBe('string');
       expect(mockedTaskService.getAllTasks).toHaveBeenCalledTimes(1);
     });
 
