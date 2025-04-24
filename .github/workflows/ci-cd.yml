@@ -128,7 +128,6 @@ jobs:
     outputs:
       # Outputs needed for subsequent CD jobs
       repo_name: ${{ steps.set_outputs.outputs.repo_name }}
-      image_name: ${{ steps.set_outputs.outputs.image_name }}
       image_tag_sha: ${{ steps.set_outputs.outputs.image_tag_sha }}
 
     steps:
@@ -203,7 +202,6 @@ jobs:
         run: |
           echo "Setting outputs..."
           echo "repo_name=${{ github.event.repository.name }}" >> "$GITHUB_OUTPUT"
-          echo "image_name=${{ secrets.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}" >> "$GITHUB_OUTPUT"
           echo "image_tag_sha=${{ steps.docker_meta.outputs.version }}" >> "$GITHUB_OUTPUT"
 
   # --- Job 5: Deployment (Staging) ---
