@@ -3,6 +3,11 @@ import app from '../server'; // Adjust the path to your exported Express app
 import * as TaskService from '../services/task.service'; // Import the service to mock it
 import { Task, TaskStatus } from '../types/task.types'; // Import Task type
 
+type TaskResponse = Omit<Task, 'createdAt' | 'updatedAt'> & {
+  createdAt: string;
+  updatedAt: string;
+};
+
 // --- Mocking the TaskService ---
 jest.mock('../services/task.service');
 const mockedTaskService = TaskService as jest.Mocked<typeof TaskService>;
@@ -18,29 +23,26 @@ describe('Task API Endpoints', () => {
   // --- GET /tasks ---
   describe('GET ' + API_BASE_PATH, () => {
     it('should return 200 OK and an array of tasks matching the Task interface', async () => {
-      const now = new Date();
-      const mockTasks: Task[] = [
-        { id: '1', text: 'Task 1', status: 'todo', createdAt: now, updatedAt: now },
-        { id: '2', text: 'Task 2', status: 'doing', createdAt: now, updatedAt: now },
-      ];
-      mockedTaskService.getAllTasks.mockReturnValue(mockTasks);
-
+      // ... mock setup ...
       const response = await request(app)
         .get(API_BASE_PATH)
         .expect('Content-Type', /json/)
         .expect(200);
 
-      expect(response.body).toBeInstanceOf(Array);
-      expect(response.body.length).toBe(2);
-      expect(response.body[0]).toEqual(
+      // Assign to typed variable
+      const tasks = response.body as TaskResponse[];
+
+      expect(tasks).toBeInstanceOf(Array);
+      expect(tasks.length).toBe(2);
+      expect(tasks[0]).toEqual(
         expect.objectContaining({
           id: '1',
           text: 'Task 1',
           status: 'todo',
         })
       );
-      expect(response.body[0]).toHaveProperty('createdAt');
-      expect(response.body[0]).toHaveProperty('updatedAt');
+      expect(tasks[0]).toHaveProperty('createdAt');
+      expect(tasks[0]).toHaveProperty('updatedAt');
       expect(mockedTaskService.getAllTasks).toHaveBeenCalledTimes(1);
     });
 
@@ -89,8 +91,8 @@ describe('Task API Endpoints', () => {
       // Check date properties exist (serialized as strings)
       expect(response.body).toHaveProperty('createdAt');
       expect(response.body).toHaveProperty('updatedAt');
-      expect(typeof response.body.createdAt).toBe('string'); // Dates are serialized
-      expect(typeof response.body.updatedAt).toBe('string');
+      expect(typeof (response.body as TaskResponse).createdAt).toBe('string');
+      expect(typeof (response.body as TaskResponse).updatedAt).toBe('string');
 
       expect(mockedTaskService.createTask).toHaveBeenCalledWith(newTaskData.text);
       expect(mockedTaskService.createTask).toHaveBeenCalledTimes(1);
@@ -177,10 +179,10 @@ describe('Task API Endpoints', () => {
         })
       );
       // Check date properties exist and are strings
-      expect(response.body).toHaveProperty('createdAt');
-      expect(response.body).toHaveProperty('updatedAt');
-      expect(typeof response.body.createdAt).toBe('string');
-      expect(typeof response.body.updatedAt).toBe('string');
+      expect(response.body).toHaveProperty('createdAt'); // Keep this simple check
+      expect(response.body).toHaveProperty('updatedAt'); // Keep this simple check
+      expect(typeof (response.body as TaskResponse).createdAt).toBe('string'); // Assert type before accessing property
+      expect(typeof (response.body as TaskResponse).updatedAt).toBe('string'); // Assert type before accessing property
 
       expect(mockedTaskService.updateTask).toHaveBeenCalledWith(taskId, validUpdateData);
       expect(mockedTaskService.updateTask).toHaveBeenCalledTimes(1);

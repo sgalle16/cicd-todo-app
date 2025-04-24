@@ -4,6 +4,11 @@ import * as TaskController from '../controllers/task.controller';
 import * as TaskService from '../services/task.service';
 import { Task, TaskStatus } from '../types/task.types';
 
+type TaskResponse = Omit<Task, 'createdAt' | 'updatedAt'> & {
+  createdAt: string;
+  updatedAt: string;
+};
+
 // --- Mocking the TaskService ---
 jest.mock('../services/task.service');
 const mockedTaskService = TaskService as jest.Mocked<typeof TaskService>;
@@ -40,7 +45,7 @@ describe('Task Controller - Unit Tests', () => {
       expect(mockedTaskService.getAllTasks).toHaveBeenCalledTimes(1);
       expect(res.statusCode).toBe(200);
 
-      const responseData = res._getJSONData();
+      const responseData = res._getJSONData() as TaskResponse[];
       expect(responseData).toBeInstanceOf(Array);
       expect(responseData.length).toBe(2);
       // Check the structure and non-date fields using objectContaining
@@ -100,8 +105,7 @@ describe('Task Controller - Unit Tests', () => {
       expect(mockedTaskService.createTask).toHaveBeenCalledTimes(1);
       expect(res.statusCode).toBe(201);
 
-      // --- Correction ---
-      const responseData = res._getJSONData();
+      const responseData = res._getJSONData() as TaskResponse;
       // Check the structure and non-date fields using objectContaining
       expect(responseData).toEqual(
         expect.objectContaining({
@@ -210,7 +214,7 @@ describe('Task Controller - Unit Tests', () => {
       expect(mockedTaskService.updateTask).toHaveBeenCalledTimes(1);
       expect(res.statusCode).toBe(200);
 
-      const responseData = res._getJSONData();
+      const responseData = res._getJSONData() as TaskResponse;
       // Check the structure and non-date fields using objectContaining
       expect(responseData).toEqual(
         expect.objectContaining({
