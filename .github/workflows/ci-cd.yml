@@ -205,3 +205,274 @@ jobs:
           echo "repo_name=${{ github.event.repository.name }}" >> "$GITHUB_OUTPUT"
           echo "image_name=${{ secrets.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}" >> "$GITHUB_OUTPUT"
           echo "image_tag_sha=${{ steps.docker_meta.outputs.version }}" >> "$GITHUB_OUTPUT"
+
+  # --- Job 5: Deployment (Staging) ---
+  deploy-cfn-staging:
+    name: Deploy to Staging
+    needs: [docker-build-scan-push]
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment:
+      name: staging
+      url: ${{ steps.get_cfn_outputs_staging.outputs.alb_url }}
+    outputs:
+      alb_url_staging: ${{ steps.get_cfn_outputs_staging.outputs.alb_url }}
+      cluster_name_staging: ${{ steps.get_cfn_outputs_staging.outputs.cluster_name }}
+      service_name_staging: ${{ steps.get_cfn_outputs_staging.outputs.service_name }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4.2.2
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Deploy CloudFormation Staging Stack
+        id: deploy_cfn_staging
+        run: |
+          echo "Deploying CloudFormation stack for Staging..."
+          IMAGE_NAME="${{ secrets.DOCKERHUB_USERNAME }}/${{ needs.docker-build-scan-push.outputs.repo_name }}"
+          IMAGE_TAG_SHA="${{ needs.docker-build-scan-push.outputs.image_tag_sha }}"
+
+          # Verify that the image name and tag are not empty
+          if [ -z "$IMAGE_NAME" ]; then echo "::error::Image Name output from previous job is empty!" && exit 1; fi
+          if [ -z "$IMAGE_TAG_SHA" ]; then echo "::error::Image Tag SHA output from previous job is empty!" && exit 1; fi
+
+          IMAGE_URI="${IMAGE_NAME}:${IMAGE_TAG_SHA}"
+          echo "Deploying Image URI to Staging: $IMAGE_URI"
+
+          aws cloudformation deploy \
+              --template-file template.yml \
+              --stack-name todo-app-staging-stack \
+              --parameter-overrides \
+                EnvironmentName=staging \
+                DockerImageUri=${IMAGE_URI} \
+                LabRoleArn=${{ secrets.LAB_ROLE_ARN }} \
+                VpcId=${{ secrets.VPC_ID }} \
+                SubnetIds="${{ secrets.SUBNET_IDS }}" \
+              --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+              --no-fail-on-empty-changes \
+              --region us-east-1
+
+      - name: Get Staging Stack Outputs
+        # Only runs if the previous step was successful
+        if: steps.deploy_cfn_staging.outcome == 'success'
+        id: get_cfn_outputs_staging
+        run: |
+          echo "Fetching Staging stack outputs..."
+          # Install jq if needed
+          if ! command -v jq &> /dev/null; then sudo apt-get update && sudo apt-get install -y jq; fi
+
+          STACK_OUTPUTS=$(aws cloudformation describe-stacks --stack-name todo-app-staging-stack --query "Stacks[0].Outputs" --region us-east-1 --output json)
+          echo "Raw Staging Stack Outputs: $STACK_OUTPUTS"
+
+          CLUSTER_NAME=$(echo $STACK_OUTPUTS | jq -r '.[] | select(.OutputKey=="ECSClusterName") | .OutputValue')
+          SERVICE_NAME=$(echo $STACK_OUTPUTS | jq -r '.[] | select(.OutputKey=="ECSServiceName") | .OutputValue')
+          ALB_DNS=$(echo $STACK_OUTPUTS | jq -r '.[] | select(.OutputKey=="ALBDnsName") | .OutputValue')
+
+          if [ -z "$ALB_DNS" ] || [ "$ALB_DNS" == "null" ]; then echo "Error: Staging ALBDnsName not found." && exit 1; fi
+          if [ -z "$CLUSTER_NAME" ] || [ "$CLUSTER_NAME" == "null" ]; then echo "Error: Staging ECSClusterName not found." && exit 1; fi
+          if [ -z "$SERVICE_NAME" ] || [ "$SERVICE_NAME" == "null" ]; then echo "Error: Staging ECSServiceName not found." && exit 1; fi
+
+          echo "cluster_name=${CLUSTER_NAME}" >> $GITHUB_OUTPUT
+          echo "service_name=${SERVICE_NAME}" >> $GITHUB_OUTPUT
+          echo "alb_url=http://${ALB_DNS}" >> $GITHUB_OUTPUT
+          echo "Staging Outputs Set: Cluster=${CLUSTER_NAME}, Service=${SERVICE_NAME}, URL=http://${ALB_DNS}/"
+
+  # --- Job 6: Update Staging Service & Force New Deployment ---
+  update-service-staging:
+    name: Update Staging Service
+    needs: [deploy-cfn-staging]
+    runs-on: ubuntu-24.04
+    environment: staging
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Force New Deployment ECS Service Staging & Wait
+        run: |
+          echo "Forcing new deployment for Staging service..."
+          CLUSTER_NAME="${{ needs.deploy-cfn-staging.outputs.cluster_name_staging }}"
+          SERVICE_NAME="${{ needs.deploy-cfn-staging.outputs.service_name_staging }}"
+          echo "Updating Staging Service: Cluster=$CLUSTER_NAME, Service=$SERVICE_NAME"
+          aws ecs update-service --cluster $CLUSTER_NAME \
+                                --service $SERVICE_NAME \
+                                --force-new-deployment \
+                                --region us-east-1
+          echo "Waiting for Staging service deployment to stabilize..."
+          aws ecs wait services-stable --cluster $CLUSTER_NAME --services $SERVICE_NAME --region us-east-1
+          echo "Staging service deployment stable."
+
+  # --- Job 7: Run Acceptance Tests on Staging ---
+  test-staging:
+    name: Run Acceptance Tests on Staging
+    needs: [update-service-staging, deploy-cfn-staging]
+    runs-on: ubuntu-24.04
+    environment: staging
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4.4.0
+        with:
+          node-version: '22.14.0'
+          cache: 'npm'
+
+      - name: Install Dependencies & Playwright Browsers
+        run: |
+          npm ci
+          npm run test:e2e:setup
+
+      - name: Run Acceptance Tests against Staging
+        env:
+          APP_BASE_URL: ${{ needs.deploy-cfn-staging.outputs.alb_url_staging }}
+        run: |
+          echo "Running acceptance tests against Staging : $APP_BASE_URL..."
+          sleep 30 # Give ALB time to register healthy targets
+          npm run test:acceptance
+
+  # --- Job 8: Deploy Infrastructure to Production ---
+  deploy-cfn-prod:
+    name: Deploy to Production
+    needs: [docker-build-scan-push, test-staging]
+    runs-on: ubuntu-24.04
+    environment:
+      name: production
+      url: ${{ steps.get_cfn_outputs_prod.outputs.alb_url }}
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    outputs:
+      alb_url_prod: ${{ steps.get_cfn_outputs_prod.outputs.alb_url }}
+      cluster_name_prod: ${{ steps.get_cfn_outputs_prod.outputs.cluster_name }}
+      service_name_prod: ${{ steps.get_cfn_outputs_prod.outputs.service_name }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4.2.2
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Deploy/Update CloudFormation Production Stack
+        run: |
+          # Usa la MISMA tag SHA que se desplegó en Staging
+          IMAGE_NAME="${{ secrets.DOCKERHUB_USERNAME }}/${{ needs.docker-build-scan-push.outputs.repo_name }}"
+          IMAGE_TAG="${{ needs.docker-build-scan-push.outputs.image_tag_sha }}"
+          IMAGE_URI="${IMAGE_NAME}:${IMAGE_TAG}"
+          echo "Deploying Image URI to Production: $IMAGE_URI"
+
+          aws cloudformation deploy \
+              --template-file template.yml \
+              --stack-name todo-app-prod-stack \
+              --parameter-overrides \
+                EnvironmentName=production \
+                DockerImageUri=${IMAGE_URI} \
+                LabRoleArn=${{ secrets.LAB_ROLE_ARN }} \
+                VpcId=${{ secrets.VPC_ID }} \
+                SubnetIds="${{ secrets.SUBNET_IDS }}" \
+              --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+              --no-fail-on-empty-changes \
+              --region us-east-1
+
+      - name: Get Production Stack Outputs
+        # Only runs if the previous step (CFN Prod) was successful
+        id: get_cfn_outputs_prod
+        run: |
+          echo "Fetching Production stack outputs..."
+          if ! command -v jq &> /dev/null; then sudo apt-get update && sudo apt-get install -y jq; fi
+          STACK_OUTPUTS=$(aws cloudformation describe-stacks --stack-name todo-app-prod-stack --query "Stacks[0].Outputs" --region us-east-1 --output json)
+          echo "Raw Production Stack Outputs: $STACK_OUTPUTS"
+
+          CLUSTER_NAME=$(echo $STACK_OUTPUTS | jq -r '.[] | select(.OutputKey=="ECSClusterName") | .OutputValue')
+          SERVICE_NAME=$(echo $STACK_OUTPUTS | jq -r '.[] | select(.OutputKey=="ECSServiceName") | .OutputValue')
+          ALB_DNS=$(echo $STACK_OUTPUTS | jq -r '.[] | select(.OutputKey=="ALBDnsName") | .OutputValue')
+
+          if [ -z "$ALB_DNS" ] || [ "$ALB_DNS" == "null" ]; then echo "Error: Production ALBDnsName not found." && exit 1; fi
+          if [ -z "$CLUSTER_NAME" ] || [ "$CLUSTER_NAME" == "null" ]; then echo "Error: Production ECSClusterName not found." && exit 1; fi
+          if [ -z "$SERVICE_NAME" ] || [ "$SERVICE_NAME" == "null" ]; then echo "Error: Production ECSServiceName not found." && exit 1; fi
+
+          echo "cluster_name=${CLUSTER_NAME}" >> $GITHUB_OUTPUT
+          echo "service_name=${SERVICE_NAME}" >> $GITHUB_OUTPUT
+          echo "alb_url=http://${ALB_DNS}" >> $GITHUB_OUTPUT
+          echo "Production Outputs Set: Cluster=${CLUSTER_NAME}, Service=${SERVICE_NAME}, URL=http://${ALB_DNS}/"
+
+  # --- Job 9: Update Production Service & Force New Deployment ---
+  update-service-prod:
+    name: Update Production Service
+    needs: [docker-build-scan-push, deploy-cfn-prod]
+    runs-on: ubuntu-24.04
+    environment: production
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Force New Deployment ECS Service Production & Wait
+        run: |
+          echo "Forcing new deployment for Production service..."
+          CLUSTER_NAME="${{ needs.deploy-cfn-prod.outputs.cluster_name_prod }}"
+          SERVICE_NAME="${{ needs.deploy-cfn-prod.outputs.service_name_prod }}"
+          echo "Updating Production Service: Cluster=$CLUSTER_NAME, Service=$SERVICE_NAME"
+          aws ecs update-service --cluster $CLUSTER_NAME \
+                                --service $SERVICE_NAME \
+                                --force-new-deployment \
+                                --region us-east-1
+          echo "Waiting for Production service deployment to stabilize..."
+          aws ecs wait services-stable --cluster $CLUSTER_NAME --services $SERVICE_NAME --region us-east-1
+          echo "Production service deployment stable."
+
+  # --- Job 10: Run Smoke Tests on Production ---
+  smoke-test-prod:
+    name: Run Smoke Tests on Production
+    needs: [update-service-prod, deploy-cfn-prod]
+    runs-on: ubuntu-24.04
+    environment: production
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4.4.0
+        with:
+          node-version: '22.14.0'
+          cache: 'npm'
+
+      - name: Install Dependencies & Playwright Browsers
+        run: |
+          npm ci
+          npm run test:e2e:setup
+
+      - name: Run Smoke Tests against Production
+        env:
+          APP_BASE_URL: ${{ needs.deploy-cfn-prod.outputs.alb_url_prod }}
+        run: |
+          echo "Running smoke tests against Production : $APP_BASE_URL..."
+          sleep 30 # Give ALB time to register healthy targets
+          npm run test:smoke
