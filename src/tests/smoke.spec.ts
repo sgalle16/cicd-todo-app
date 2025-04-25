@@ -33,7 +33,7 @@ test.describe('Production Smoke Tests', () => {
     // Check if the response status is 2xx.
     expect(response.ok(), `Health check failed with status ${response.status()}`).toBeTruthy();
     const body = (await response.json()) as HealthStatus;
-    expect(body, 'Health check response body did not match expected').toEqual({ status: 'OK' });
+    expect(body, 'Health check response body did not match expected').toEqual({ status: 'TEST' });
   });
 
   /* 
