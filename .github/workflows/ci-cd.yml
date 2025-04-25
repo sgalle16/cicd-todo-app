@@ -357,6 +357,8 @@ jobs:
       alb_url_prod: ${{ steps.get_cfn_outputs_prod.outputs.alb_url }}
       cluster_name_prod: ${{ steps.get_cfn_outputs_prod.outputs.cluster_name }}
       service_name_prod: ${{ steps.get_cfn_outputs_prod.outputs.service_name }}
+      deploying_task_def_arn_prod: ${{ steps.get_cfn_outputs_prod.outputs.task_def_arn }}
+      previous_task_def_arn_prod: ${{ steps.get_previous_task_def.outputs.previous_task_def_arn }}
 
     steps:
       - name: Checkout Code
@@ -370,9 +372,30 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: us-east-1
 
+      - name: Get Current Production Task Definition ARN (for rollback)
+        id: get_previous_task_def
+        run: |
+          # Usa nombres fijos o busca el stack si no existe
+          CLUSTER_NAME_QUERY=$(aws cloudformation describe-stacks --stack-name todo-app-prod-stack --query "Stacks[0].Outputs[?OutputKey=='ECSClusterName'].OutputValue" --output text --region us-east-1 2>/dev/null || echo "NOT_FOUND")
+          SERVICE_NAME_QUERY=$(aws cloudformation describe-stacks --stack-name todo-app-prod-stack --query "Stacks[0].Outputs[?OutputKey=='ECSServiceName'].OutputValue" --output text --region us-east-1 2>/dev/null || echo "NOT_FOUND")
+
+          if [ "$CLUSTER_NAME_QUERY" == "NOT_FOUND" ] || [ "$SERVICE_NAME_QUERY" == "NOT_FOUND" ]; then
+            echo "Production stack/service not found or first deployment. Setting previous ARN to NONE."
+            echo "previous_task_def_arn=NONE" >> $GITHUB_OUTPUT
+          else
+            PREVIOUS_TASK_DEF_ARN=$(aws ecs describe-services --cluster "$CLUSTER_NAME_QUERY" --services "$SERVICE_NAME_QUERY" --query "services[0].taskDefinition" --output text --region us-east-1)
+            if [ -z "$PREVIOUS_TASK_DEF_ARN" ]; then
+               echo "Warning: Could not get previous task definition ARN. Setting to NONE."
+               echo "previous_task_def_arn=NONE" >> $GITHUB_OUTPUT
+            else
+               echo "Previous stable Task Definition ARN: $PREVIOUS_TASK_DEF_ARN"
+               echo "previous_task_def_arn=$PREVIOUS_TASK_DEF_ARN" >> $GITHUB_OUTPUT
+            fi
+          fi
+
       - name: Deploy/Update CloudFormation Production Stack
         run: |
-          # Usa la MISMA tag SHA que se desplegó en Staging
+          # echo "Deploying CloudFormation stack for Deploy... Using the same tag sha deployed in STG"
           IMAGE_NAME="${{ secrets.DOCKERHUB_USERNAME }}/${{ needs.docker-build-scan-push.outputs.repo_name }}"
           IMAGE_TAG="${{ needs.docker-build-scan-push.outputs.image_tag_sha }}"
           IMAGE_URI="${IMAGE_NAME}:${IMAGE_TAG}"
@@ -391,7 +414,7 @@ jobs:
               --no-fail-on-empty-changes \
               --region us-east-1
 
-      - name: Get Production Stack Outputs
+      - name: Get Production Stack Outputs and New Task Definition
         # Only runs if the previous step (CFN Prod) was successful
         id: get_cfn_outputs_prod
         run: |
@@ -412,6 +435,13 @@ jobs:
           echo "service_name=${SERVICE_NAME}" >> $GITHUB_OUTPUT
           echo "alb_url=http://${ALB_DNS}" >> $GITHUB_OUTPUT
           echo "Production Outputs Set: Cluster=${CLUSTER_NAME}, Service=${SERVICE_NAME}, URL=http://${ALB_DNS}/"
+
+          # Obtener el ARN de la Task Def que CFN ACABA de configurar
+          TASK_DEF_ARN=$(aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$SERVICE_NAME" --query "services[0].taskDefinition" --output text --region us-east-1)
+          if [ -z "$TASK_DEF_ARN" ]; then echo "::error::Could not get NEW Task Definition ARN for production service." && exit 1; fi
+          echo "Production Task Definition ARN for this deployment: $TASK_DEF_ARN"
+          # ... (echo outputs a GITHUB_OUTPUT, incluyendo task_def_arn) ...
+          echo "task_def_arn=${TASK_DEF_ARN}" >> $GITHUB_OUTPUT
 
   # --- Job 9: Update Production Service & Force New Deployment ---
   update-service-prod:
@@ -435,9 +465,12 @@ jobs:
           echo "Forcing new deployment for Production service..."
           CLUSTER_NAME="${{ needs.deploy-cfn-prod.outputs.cluster_name_prod }}"
           SERVICE_NAME="${{ needs.deploy-cfn-prod.outputs.service_name_prod }}"
+          TASK_DEF_ARN="${{ needs.deploy-cfn-prod.outputs.deploying_task_def_arn_prod }}"
+
           echo "Updating Production Service: Cluster=$CLUSTER_NAME, Service=$SERVICE_NAME"
           aws ecs update-service --cluster $CLUSTER_NAME \
                                 --service $SERVICE_NAME \
+                                --task-definition "$TASK_DEF_ARN" \
                                 --force-new-deployment \
                                 --region us-east-1
           echo "Waiting for Production service deployment to stabilize..."
@@ -474,3 +507,96 @@ jobs:
           echo "Running smoke tests against Production : $APP_BASE_URL..."
           sleep 30 # Give ALB time to register healthy targets
           npm run test:smoke
+
+  # --- Job 11: Initiate Rollback Production if Smoke Tests got failure- ---
+  rollback-prod:
+    name: Rollback Production Deployment
+    needs: [smoke-test-prod, update-service-prod, deploy-cfn-prod]
+    runs-on: ubuntu-24.04
+    environment: production
+    # This job will only run if the previous job (smoke-test-prod) fails
+    if: failure() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Initiate Rollback Based on Previous Image
+        run: |
+          # To get the necessary data from previous jobs.
+          CLUSTER_NAME="${{ needs.deploy-cfn-prod.outputs.cluster_name_prod }}"
+          SERVICE_NAME="${{ needs.deploy-cfn-prod.outputs.service_name_prod }}"
+          PREVIOUS_STABLE_TASK_DEF_ARN="${{ needs.deploy-cfn-prod.outputs.previous_task_def_arn_prod }}"
+
+          echo "::error::Smoke tests failed! Initiating rollback procedure..."
+          if [ "$PREVIOUS_STABLE_TASK_DEF_ARN" == "NONE" ]; then
+            echo "::error::CRITICAL: Previous stable task definition ARN is not available. Cannot perform automated rollback."
+            # Opcional: Intentar obtener la penúltima revisión como fallback si falló el primer despliegue?
+            # Por ahora, fallamos si no hay ARN previo guardado.
+            exit 1
+          fi
+
+          echo "Rolling back Production service to Task Definition: $PREVIOUS_STABLE_TASK_DEF_ARN"
+
+          # 1. Describe la definición de tarea BUENA ANTERIOR para obtener su JSON
+          echo "Describing previous stable task definition: $PREVIOUS_STABLE_TASK_DEF_ARN"
+          TASK_DEFINITION_JSON=$(aws ecs describe-task-definition --task-definition "$PREVIOUS_STABLE_TASK_DEF_ARN" --query 'taskDefinition' --output json --region us-east-1)
+
+          if [ -z "$TASK_DEFINITION_JSON" ] || [ "$TASK_DEFINITION_JSON" == "null" ]; then
+            echo "::error::Failed to describe previous stable task definition $PREVIOUS_STABLE_TASK_DEF_ARN. It might have been deleted or is inaccessible."
+            exit 1
+          fi
+
+          # 2. Prepara el JSON para registrar una NUEVA revisión basada en la anterior
+          #    Eliminando campos que no se permiten en register-task-definition
+          echo "Preparing JSON for new task definition based on $PREVIOUS_STABLE_TASK_DEF_ARN..."
+          if ! command -v jq &> /dev/null; then sudo apt-get update && sudo apt-get install -y jq; fi
+
+          # Quitamos los campos no necesarios y MANTENEMOS la imagen original 
+          NEW_TASK_DEF_INPUT=$(echo $TASK_DEFINITION_JSON | jq '
+            del(.taskDefinitionArn) |
+            del(.revision) |
+            del(.status) |
+            del(.requiresAttributes) |
+            del(.compatibilities) |
+            del(.registeredAt) |
+            del(.registeredBy) |
+            del(.deregisteredAt) 
+          ')
+
+          if [ -z "$NEW_TASK_DEF_INPUT" ]; then echo "::error::Error preparing new task definition JSON for rollback." && exit 1; fi
+          # echo "Registering Task Definition with payload: $NEW_TASK_DEF_INPUT" # Debug
+
+          # 3. Registra la NUEVA revisión, que es una copia ACTIVA de la anterior
+          echo "Registering new task definition based on previous stable version..."
+          REGISTER_OUTPUT=$(aws ecs register-task-definition --cli-input-json "$NEW_TASK_DEF_INPUT" --region us-east-1)
+          ROLLBACK_TASK_DEF_ARN=$(echo $REGISTER_OUTPUT | jq -r '.taskDefinition.taskDefinitionArn')
+
+          if [ -z "$ROLLBACK_TASK_DEF_ARN" ] || [ "$ROLLBACK_TASK_DEF_ARN" == "null" ]; then
+             echo "::error::Error registering rollback task definition."
+             # Intenta obtener la imagen del JSON original como fallback para el mensaje de error
+             PREVIOUS_IMAGE_URI=$(echo $TASK_DEFINITION_JSON | jq -r '.containerDefinitions[0].image')
+             echo "Failed to register new task definition using image $PREVIOUS_IMAGE_URI (as fallback)."
+             exit 1
+          fi
+          echo "Successfully registered Rollback Task Definition: $ROLLBACK_TASK_DEF_ARN"
+
+          # 4. Actualiza el servicio para usar la NUEVA revisión registrada basada en la revisión estable anterior
+          echo "Updating service $SERVICE_NAME to use Rollback Task Definition $ROLLBACK_TASK_DEF_ARN..."
+          aws ecs update-service --cluster "$CLUSTER_NAME" \
+                                 --service "$SERVICE_NAME" \
+                                 --task-definition "$ROLLBACK_TASK_DEF_ARN" \
+                                 --force-new-deployment \
+                                 --region us-east-1
+
+          # 5. Espera a que el rollback se estabilice
+          echo "Waiting for rollback deployment to stabilize..."
+          aws ecs wait services-stable --cluster "$CLUSTER_NAME" --services "$SERVICE_NAME" --region us-east-1
+          echo "Service $SERVICE_NAME rollback attempt finished (using Task Definition $PREVIOUS_STABLE_TASK_DEF_ARN via Task Definition $ROLLBACK_TASK_DEF_ARN).)."
+
+          exit 1
