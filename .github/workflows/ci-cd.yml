@@ -372,10 +372,10 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: us-east-1
 
-      - name: Get Current Production Task Definition ARN (for rollback)
+      - name: Get Current Stable Production Task Definition ARN (for rollback)
         id: get_previous_task_def
         run: |
-          # Usa nombres fijos o busca el stack si no existe
+          # Get the cluster and service names from the production stack
           CLUSTER_NAME_QUERY=$(aws cloudformation describe-stacks --stack-name todo-app-prod-stack --query "Stacks[0].Outputs[?OutputKey=='ECSClusterName'].OutputValue" --output text --region us-east-1 2>/dev/null || echo "NOT_FOUND")
           SERVICE_NAME_QUERY=$(aws cloudformation describe-stacks --stack-name todo-app-prod-stack --query "Stacks[0].Outputs[?OutputKey=='ECSServiceName'].OutputValue" --output text --region us-east-1 2>/dev/null || echo "NOT_FOUND")
 
@@ -511,11 +511,11 @@ jobs:
   # --- Job 11: Initiate Rollback Production if Smoke Tests got failure- ---
   rollback-prod:
     name: Rollback Production Deployment
-    needs: [smoke-test-prod, update-service-prod, deploy-cfn-prod]
+    needs: [smoke-test-prod, deploy-cfn-prod]
     runs-on: ubuntu-24.04
     environment: production
     # This job will only run if the previous job (smoke-test-prod) fails
-    if: failure() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: needs.smoke-test-prod.result == 'failure' && github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
       - name: Configure AWS Credentials
@@ -526,18 +526,16 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: us-east-1
 
-      - name: Initiate Rollback Based on Previous Image
+      - name: Initiate Rollback Based on Previous Stable Task Definition
         run: |
           # To get the necessary data from previous jobs.
           CLUSTER_NAME="${{ needs.deploy-cfn-prod.outputs.cluster_name_prod }}"
           SERVICE_NAME="${{ needs.deploy-cfn-prod.outputs.service_name_prod }}"
           PREVIOUS_STABLE_TASK_DEF_ARN="${{ needs.deploy-cfn-prod.outputs.previous_task_def_arn_prod }}"
 
-          echo "::error::Smoke tests failed! Initiating rollback procedure..."
+          echo "::warning::Smoke tests failed! Initiating rollback procedure..."
           if [ "$PREVIOUS_STABLE_TASK_DEF_ARN" == "NONE" ]; then
-            echo "::error::CRITICAL: Previous stable task definition ARN is not available. Cannot perform automated rollback."
-            # Opcional: Intentar obtener la penúltima revisión como fallback si falló el primer despliegue?
-            # Por ahora, fallamos si no hay ARN previo guardado.
+            echo "::error::CRITICAL: Previous stable task definition ARN ('$PREVIOUS_STABLE_TASK_DEF_ARN') is not available. Cannot perform automated rollback." 
             exit 1
           fi
 
@@ -579,9 +577,6 @@ jobs:
 
           if [ -z "$ROLLBACK_TASK_DEF_ARN" ] || [ "$ROLLBACK_TASK_DEF_ARN" == "null" ]; then
              echo "::error::Error registering rollback task definition."
-             # Intenta obtener la imagen del JSON original como fallback para el mensaje de error
-             PREVIOUS_IMAGE_URI=$(echo $TASK_DEFINITION_JSON | jq -r '.containerDefinitions[0].image')
-             echo "Failed to register new task definition using image $PREVIOUS_IMAGE_URI (as fallback)."
              exit 1
           fi
           echo "Successfully registered Rollback Task Definition: $ROLLBACK_TASK_DEF_ARN"
@@ -597,6 +592,8 @@ jobs:
           # 5. Espera a que el rollback se estabilice
           echo "Waiting for rollback deployment to stabilize..."
           aws ecs wait services-stable --cluster "$CLUSTER_NAME" --services "$SERVICE_NAME" --region us-east-1
-          echo "Service $SERVICE_NAME rollback attempt finished (using Task Definition $PREVIOUS_STABLE_TASK_DEF_ARN via Task Definition $ROLLBACK_TASK_DEF_ARN).)."
+          echo "Service $SERVICE_NAME rollback attempt finished."
+          echo "Service is now configured to run Task Definition: $ROLLBACK_TASK_DEF_ARN (originally based on $PREVIOUS_STABLE_TASK_DEF_ARN)."
 
+          echo "::error::Pipeline finished with rollback due to smoke test failure."
           exit 1
