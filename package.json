@@ -20,7 +20,8 @@
     "test:cov": "jest --coverage",
     "test:watch": "jest --watch",
     "test:e2e:setup": "npx playwright install --with-deps",
-    "test:acceptance": "npx playwright test src/tests/tasks-ui.pw.spec.ts"
+    "test:acceptance": "npx playwright test src/tests/tasks-ui.pw.spec.ts",
+    "test:smoke": "npx playwright test src/tests/smoke.spec.ts"
   },
   "repository": {
     "type": "git",
