@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kanban Board</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body class="p-4">
+
+    <div class="main-container">
+        <h1 class="text-4xl font-bold text-center mb-6 board-title">Mi Tablero Kanban</h1>
+
+        <div class="add-task-form max-w-lg mx-auto mb-10 p-4 rounded-lg">
+            <form id="addTaskForm" class="flex items-center">
+                <input type="text" id="newTaskInput" placeholder="Añadir nueva tarea..." class="flex-grow rounded-md text-sm" required>
+                <button type="submit" class="ml-2 px-4 py-2 text-sm rounded-md font-semibold">Añadir</button>
+            </form>
+        </div>
+
+        <div id="messageArea" class="text-center mb-4 text-red-600"></div>
+
+        <div class="task-board">
+            <div class="kanban-column">
+                <h2 class="text-lg">Por Hacer</h2>
+                <div class="tasks-container" id="todo-tasks" data-column-id="todo">
+                    </div>
+            </div>
+
+            <div class="kanban-column">
+                <h2 class="text-lg">Haciendo</h2>
+                <div class="tasks-container" id="doing-tasks" data-column-id="doing">
+                    </div>
+            </div>
+
+            <div class="kanban-column">
+                <h2 class="text-lg">Hecho</h2>
+                <div class="tasks-container" id="done-tasks" data-column-id="done">
+                    </div>
+            </div>
+        </div>
+    </div> <script src="script.js"></script>
+</body>
+</html>
