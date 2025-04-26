@@ -515,7 +515,7 @@ jobs:
     runs-on: ubuntu-24.04
     environment: production
     # This job will only run if the previous job (smoke-test-prod) fails
-    if: needs.smoke-test-prod.result == 'failure' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: failure() && github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
       - name: Configure AWS Credentials
