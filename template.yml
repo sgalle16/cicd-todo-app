@@ -1,33 +1,76 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  CloudFormation template for deploying the ToDo App on ECS Fargate with ALB. 
+  CloudFormation template for Blue/Green deployment of the ToDo App on ECS Fargate with ALB. 
   Uses the default VPC and the existing LabRole.
 
 Parameters:
   EnvironmentName:
     Type: String
-    Description: 'Nombre del entorno (ej: staging, production). Usado para nombrar recursos.'
+    Description: 'Environment name (e.g., staging, production). Used for resource naming.'
     AllowedValues: [staging, production]
   DockerImageUri:
     Type: String
-    Description: 'URI completo de la imagen Docker a desplegar (ej: usuario/repo:tag).'
+    Description: 'Full URI of the Docker image to deploy (e.g., user/repo:tag).'
   LabRoleArn:
     Type: String
-    Description: ARN completo del rol IAM 'LabRole' existente en la cuenta.
+    Description: Full ARN of the existing 'LabRole' IAM role in the account.
   VpcId:
     Type: AWS::EC2::VPC::Id
-    Description: ID de la VPC por defecto donde desplegar.
+    Description: ID of the default VPC for deployment.
   SubnetIds:
     Type: List<AWS::EC2::Subnet::Id>
-    Description: Lista de al menos DOS IDs de subredes PuBLICAS de la VPC por defecto en diferentes AZs.
+    Description: List of at least TWO PUBLIC subnet IDs from the default VPC in different AZs.
+  ProductionListenerPort:
+    Type: Number
+    Default: 80
+    Description: 'Port for the production listener (e.g., 80 or 443).'
+  TestListenerPort:
+    Type: Number
+    Default: 8080
+    Description: Port for the idle environment test listener.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: 'Application Configuration'
+        Parameters:
+          - EnvironmentName
+          - DockerImageUri
+      - Label:
+          default: 'Network Configuration'
+        Parameters:
+          - VpcId
+          - SubnetIds
+          - ProductionListenerPort
+          - TestListenerPort
+      - Label:
+          default: 'IAM Configuration'
+        Parameters:
+          - LabRoleArn
+    ParameterLabels:
+      EnvironmentName:
+        default: 'Environment Name'
+      DockerImageUri:
+        default: 'Docker Image URI'
+      LabRoleArn:
+        default: 'Lab Role ARN'
+      VpcId:
+        default: 'VPC ID'
+      SubnetIds:
+        default: 'Public Subnet IDs'
+      ProductionListenerPort:
+        default: 'Production Listener Port'
+      TestListenerPort:
+        default: 'Test Listener Port'
 
 Resources:
-  # --- Grupo de Logs para ECS ---
+  # --- ECS Log Group ---
   ECSLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub '/ecs/todo-app-${EnvironmentName}-task'
-      RetentionInDays: 7 # Retener logs por 7 días (ajusta si es necesario)
+      RetentionInDays: 7 # Retain logs for 7 days (adjust if needed)
       Tags:
         - Key: Environment
           Value: !Ref EnvironmentName
@@ -41,35 +84,41 @@ Resources:
         - Key: Environment
           Value: !Ref EnvironmentName
 
-  # --- Seguridad ---
-  # Security Group para el Load Balancer (permite HTTP desde internet)
+  # --- Security ---
+  # Security Group for the Load Balancer (allows HTTP from the internet)
   ALBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupName: !Sub 'alb-sg-${EnvironmentName}'
-      GroupDescription: Permite trafico HTTP al ALB
+      GroupDescription: 'Allows HTTP/Test traffic to ALB for ${EnvironmentName}'
       VpcId: !Ref VpcId
       SecurityGroupIngress:
+        # Rule for the production port
         - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
+          FromPort: !Ref ProductionListenerPort
+          ToPort: !Ref ProductionListenerPort
+          CidrIp: 0.0.0.0/0
+        # Rule for the test port
+        - IpProtocol: tcp
+          FromPort: !Ref TestListenerPort
+          ToPort: !Ref TestListenerPort
           CidrIp: 0.0.0.0/0
       Tags:
         - Key: Environment
           Value: !Ref EnvironmentName
 
-  # Security Group para el Servicio ECS (permite trafico desde el ALB en el puerto 5000)
+  # Security Group for the ECS Service (allows traffic from the ALB on port 5000)
   ECSServiceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupName: !Sub 'ecs-service-sg-${EnvironmentName}'
-      GroupDescription: Permite trafico desde el ALB al servicio ECS
+      GroupDescription: 'Allows traffic from ALB to ECS service for ${EnvironmentName}'
       VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: tcp
-          FromPort: 5000 # Puerto del contenedor
+          FromPort: 5000 # Container port
           ToPort: 5000
-          SourceSecurityGroupId: !Ref ALBSecurityGroup # Solo permite desde el ALB SG
+          SourceSecurityGroupId: !Ref ALBSecurityGroup # Only allowed from the ALB SG
       Tags:
         - Key: Environment
           Value: !Ref EnvironmentName
@@ -79,7 +128,7 @@ Resources:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
       Name: !Sub 'todo-app-${EnvironmentName}-alb'
-      Subnets: !Ref SubnetIds # Debe estar en subredes publicas
+      Subnets: !Ref SubnetIds # Must be on public subnets
       SecurityGroups:
         - !Ref ALBSecurityGroup
       Scheme: internet-facing
@@ -88,63 +137,99 @@ Resources:
         - Key: Environment
           Value: !Ref EnvironmentName
 
-  # Listener HTTP en el puerto 80
-  ALBListener:
+  # --- Production Listener (Initially targets Blue) ---
+  ALBListenerProd:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
       LoadBalancerArn: !Ref ApplicationLoadBalancer
-      Port: 80
+      Port: !Ref ProductionListenerPort
+      Protocol: HTTP # Switch to HTTPS if you have a certificate
+      DefaultActions:
+        - Type: forward
+          # Initially points to the Target Group defined by the InitialTargetGroup parameter
+          TargetGroupArn: !Ref ECSTargetGroupBlue # Important: Start by aiming for Blue!
+
+  # --- Test Listener (Initially targets Green) ---
+  ALBListenerTest:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: !Ref TestListenerPort
       Protocol: HTTP
       DefaultActions:
         - Type: forward
-          TargetGroupArn: !Ref ECSTargetGroup
+          TargetGroupArn: !Ref ECSTargetGroupGreen # Important: Start by aiming for Green!
 
-  # Target Group para las tareas ECS
-  ECSTargetGroup:
+  # --- Targets Group for ECS tasks ---
+  # --- Target Group BLUE ---
+  ECSTargetGroupBlue: # Target Group for the current stable release
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      Name: !Sub 'tg-ecs-${EnvironmentName}'
+      Name: !Sub 'tg-ecs-${EnvironmentName}-blue'
       VpcId: !Ref VpcId
-      Port: 5000 # Puerto del contenedor
+      Port: 5000
       Protocol: HTTP
-      TargetType: ip # Necesario para Fargate
-      # --- Propiedades de Health Check (CORREGIDO) ---
+      TargetType: ip
       HealthCheckEnabled: true
-      HealthCheckPath: /health # Endpoint de health check de la app
-      HealthCheckPort: '5000' # Puerto del contenedor
+      HealthCheckPath: /health
+      HealthCheckPort: '5000'
       HealthCheckProtocol: HTTP
       HealthyThresholdCount: 2
       UnhealthyThresholdCount: 2
-      HealthCheckIntervalSeconds: 15 # Nombre corregido
-      HealthCheckTimeoutSeconds: 5 # Nombre corregido
-      # --- Fin Propiedades de Health Check ---
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
       Tags:
         - Key: Environment
           Value: !Ref EnvironmentName
+        - Key: Color # Label to identify
+          Value: Blue
 
-  # --- Definicion de Tarea ECS ---
+  # --- Target Group GREEN ---
+  ECSTargetGroupGreen: #Target Group for the new version
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub 'tg-ecs-${EnvironmentName}-green'
+      VpcId: !Ref VpcId
+      Port: 5000
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckEnabled: true
+      HealthCheckPath: /health
+      HealthCheckPort: '5000'
+      HealthCheckProtocol: HTTP
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Color # Label to identify
+          Value: Green
+
+  # --- ECS Task Definition ---
   ECSTaskDefinition:
     Type: AWS::ECS::TaskDefinition
-    DependsOn: ECSLogGroup # Asegura que el Log Group exista primero
+    DependsOn: ECSLogGroup # Ensure the Log Group exists first
     Properties:
       Family: !Sub 'todo-app-${EnvironmentName}-task'
       RequiresCompatibilities:
         - FARGATE
       NetworkMode: awsvpc
-      Cpu: '256' # 0.25 vCPU (minimo Fargate)
-      Memory: '512' # 0.5 GB (minimo Fargate)
-      TaskRoleArn: !Ref LabRoleArn # Rol para permisos DENTRO del contenedor (si necesita llamar a otros servicios AWS)
-      ExecutionRoleArn: !Ref LabRoleArn # Rol para que ECS/Fargate pueda descargar imagen, enviar logs, etc.
+      Cpu: '256' # 0.25 vCPU (min Fargate)
+      Memory: '512' # 0.5 GB (min Fargate)
+      TaskRoleArn: !Ref LabRoleArn # Role for permissions INSIDE the container (if you need to call other AWS services)
+      ExecutionRoleArn: !Ref LabRoleArn # Role for ECS/Fargate to download image, send logs, etc.
       ContainerDefinitions:
         - Name: !Sub 'todo-app-${EnvironmentName}-container'
-          Image: !Ref DockerImageUri # Imagen de Docker Hub
+          Image: !Ref DockerImageUri # Docker Hub Image
           PortMappings:
             - ContainerPort: 5000
               Protocol: tcp
           LogConfiguration:
             LogDriver: awslogs
             Options:
-              # Usar !Ref para hacer referencia al Log Group creado
+              # Use !Ref to reference the created Log Group
               awslogs-group: !Ref ECSLogGroup
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: ecs
@@ -152,48 +237,75 @@ Resources:
         - Key: Environment
           Value: !Ref EnvironmentName
 
-  # --- Servicio ECS ---
+  # --- ECS Service ---
   ECSService:
     Type: AWS::ECS::Service
     Properties:
       ServiceName: !Sub 'todo-app-${EnvironmentName}-service'
       Cluster: !Ref ECSCluster
       TaskDefinition: !Ref ECSTaskDefinition
-      DesiredCount: 1 # Numero inicial de tareas
+      DesiredCount: 1 # Initial number of tasks
       LaunchType: FARGATE
       NetworkConfiguration:
         AwsvpcConfiguration:
-          AssignPublicIp: ENABLED # Necesario en subredes publicas sin NAT Gateway
-          Subnets: !Ref SubnetIds # Las mismas subredes publicas del ALB
+          AssignPublicIp: ENABLED # Required on public subnets without NAT Gateway
+          Subnets: !Ref SubnetIds # The same public subnets as the ALB
           SecurityGroups:
             - !Ref ECSServiceSecurityGroup
       LoadBalancers:
         - ContainerName: !Sub 'todo-app-${EnvironmentName}-container'
           ContainerPort: 5000
-          TargetGroupArn: !Ref ECSTargetGroup
-      # DesiredCount y TaskDefinition se actualizan en despliegues posteriores
+          TargetGroupArn: !Ref ECSTargetGroupBlue # Record tasks in Blue
+        - ContainerName: !Sub 'todo-app-${EnvironmentName}-container'
+          ContainerPort: 5000
+          TargetGroupArn: !Ref ECSTargetGroupGreen # Record tasks in Green
       DeploymentConfiguration:
-        MinimumHealthyPercent: 50 # Permite que baje al 50% durante el deploy
-        MaximumPercent: 200 # Permite que suba al 200% temporalmente
+        MinimumHealthyPercent: 50 # Allow it to drop to 50% during deploy
+        MaximumPercent: 200 # Allows it to go up to 200% temporarily
       Tags:
         - Key: Environment
           Value: !Ref EnvironmentName
-    DependsOn: # Asegura que el listener exista antes de crear el servicio
-      - ALBListener
+    DependsOn: # Ensure the listener exists before creating the service
+      - ALBListenerProd
+      - ALBListenerTest
 
 Outputs:
-  ALBDnsName:
-    Description: DNS Name of the Application Load Balancer
-    Value: !GetAtt ApplicationLoadBalancer.DNSName
-    Export:
-      Name: !Sub '${AWS::StackName}-ALBDnsName'
   ECSClusterName:
     Description: Name of the ECS Cluster
     Value: !Ref ECSCluster
-    Export:
-      Name: !Sub '${AWS::StackName}-ECSClusterName'
+  # Names of specific services
   ECSServiceName:
     Description: Name of the ECS Service
-    Value: !GetAtt ECSService.Name # Obtener el nombre completo del servicio
+    Value: !GetAtt ECSService.Name
+  # ARNs of the Target Groups
+  TargetGroupArnBlue:
+    Description: ARN of the Blue Target Group
+    Value: !Ref ECSTargetGroupBlue
+  TargetGroupArnGreen:
+    Description: ARN of the Green Target Group
+    Value: !Ref ECSTargetGroupGreen
+  # Listener ARNs
+  ListenerArnProd:
+    Description: ARN of the Production Listener
+    Value: !Ref ALBListenerProd
     Export:
-      Name: !Sub '${AWS::StackName}-ECSServiceName'
+      Name: !Sub '${AWS::StackName}-ALBListenerProdArn'
+  ListenerArnTest:
+    Description: ARN of the Test Listener
+    Value: !Ref ALBListenerTest
+    Export:
+      Name: !Sub '${AWS::StackName}-ALBListenerTestArn'
+  # URLs
+  ALBDnsName:
+    Description: Public DNS Name of the Application Load Balancer
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+  ProductionUrl:
+    Description: Production URL (Initially points to Blue TG)
+    Value: !Sub 'http://${ApplicationLoadBalancer.DNSName}:${ProductionListenerPort}'
+  TestUrl:
+    Description: Test URL (Points to Green TG)
+    Value: !Sub 'http://${ApplicationLoadBalancer.DNSName}:${TestListenerPort}'
+  # Task Definition Family (to be able to build the ARN of the new revision)
+  TaskDefinitionFamily:
+    Description: Family of the Task Definition
+    Value: !Sub 'todo-app-${EnvironmentName}-task'

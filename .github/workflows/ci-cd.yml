@@ -83,13 +83,13 @@ jobs:
             coverage/junit.xml
           retention-days: 7
 
-      - name: Upload Build Artifact (dist)
-        if: success() # Only if build and tests is successful
-        uses: actions/upload-artifact@v4.6.2
-        with:
-          name: dist
-          path: dist/
-          retention-days: 1
+      #- name: Upload Build Artifact (dist)
+      #  if: success() # Only if build and tests is successful
+      #  uses: actions/upload-artifact@v4.6.2
+      #  with:
+      #    name: dist
+      #    path: dist/
+      #    retention-days: 1
 
   # --- Job 3: SonarCloud Analysis ---
   sonarcloud-analysis:
@@ -204,17 +204,18 @@ jobs:
           echo "repo_name=${{ github.event.repository.name }}" >> "$GITHUB_OUTPUT"
           echo "image_tag_sha=${{ steps.docker_meta.outputs.version }}" >> "$GITHUB_OUTPUT"
 
-  # --- Job 5: Deployment (Staging) ---
+  # --- Job 5: Deploy/Update Staging Infrastructure & Wait ---
   deploy-cfn-staging:
-    name: Deploy to Staging
+    name: Deploy Staging
     needs: [docker-build-scan-push]
     runs-on: ubuntu-24.04
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment:
       name: staging
-      url: ${{ steps.get_cfn_outputs_staging.outputs.alb_url }}
+      url: ${{ steps.get_cfn_outputs_staging.outputs.alb_url_8080 }}
     outputs:
-      alb_url_staging: ${{ steps.get_cfn_outputs_staging.outputs.alb_url }}
+      alb_url_staging_80: ${{ steps.get_cfn_outputs_staging.outputs.alb_url_80 }}
+      alb_url_staging_8080: ${{ steps.get_cfn_outputs_staging.outputs.alb_url_8080 }}
       cluster_name_staging: ${{ steps.get_cfn_outputs_staging.outputs.cluster_name }}
       service_name_staging: ${{ steps.get_cfn_outputs_staging.outputs.service_name }}
 
@@ -230,7 +231,7 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: us-east-1
 
-      - name: Deploy CloudFormation Staging Stack
+      - name: Deploy CFN Staging Stack
         id: deploy_cfn_staging
         run: |
           echo "Deploying CloudFormation stack for Staging..."
@@ -256,67 +257,51 @@ jobs:
               --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
               --no-fail-on-empty-changes \
               --region us-east-1
+          echo "CloudFormation deploy command finished for Staging."
 
-      - name: Get Staging Stack Outputs
+      - name: Wait Staging Service Stability & Get Outputs
         # Only runs if the previous step was successful
         if: steps.deploy_cfn_staging.outcome == 'success'
         id: get_cfn_outputs_staging
         run: |
-          echo "Fetching Staging stack outputs..."
+          echo "Fetching Staging stack outputs after Deploy..."
           # Install jq if needed
           if ! command -v jq &> /dev/null; then sudo apt-get update && sudo apt-get install -y jq; fi
-
-          STACK_OUTPUTS=$(aws cloudformation describe-stacks --stack-name todo-app-staging-stack --query "Stacks[0].Outputs" --region us-east-1 --output json)
+          STACK_NAME="todo-app-staging-stack"
+          STACK_OUTPUTS=$(aws cloudformation describe-stacks --stack-name $STACK_NAME  --query "Stacks[0].Outputs" --region us-east-1 --output json)
           echo "Raw Staging Stack Outputs: $STACK_OUTPUTS"
 
-          CLUSTER_NAME=$(echo $STACK_OUTPUTS | jq -r '.[] | select(.OutputKey=="ECSClusterName") | .OutputValue')
-          SERVICE_NAME=$(echo $STACK_OUTPUTS | jq -r '.[] | select(.OutputKey=="ECSServiceName") | .OutputValue')
-          ALB_DNS=$(echo $STACK_OUTPUTS | jq -r '.[] | select(.OutputKey=="ALBDnsName") | .OutputValue')
-
-          if [ -z "$ALB_DNS" ] || [ "$ALB_DNS" == "null" ]; then echo "Error: Staging ALBDnsName not found." && exit 1; fi
+          CLUSTER_NAME=$(echo $STACK_OUTPUTS | jq -r '.[] | select(.OutputKey=="ECSClusterName") | .OutputValue // empty')
+          SERVICE_NAME=$(echo $STACK_OUTPUTS | jq -r '.[] | select(.OutputKey=="ECSServiceName") | .OutputValue // empty')
           if [ -z "$CLUSTER_NAME" ] || [ "$CLUSTER_NAME" == "null" ]; then echo "Error: Staging ECSClusterName not found." && exit 1; fi
           if [ -z "$SERVICE_NAME" ] || [ "$SERVICE_NAME" == "null" ]; then echo "Error: Staging ECSServiceName not found." && exit 1; fi
 
+          echo "Waiting for service '$SERVICE_NAME' in cluster '$CLUSTER_NAME' to stabilize..."
+          aws ecs wait services-stable --cluster "$CLUSTER_NAME" --services "$SERVICE_NAME" --region us-east-1 || \
+            (echo "::error::ECS service failed to stabilize in Staging!" && exit 1)
+          echo "Staging ECS service is stable."
+
+          # Get Outputs 
+          ALB_DNS=$(echo $STACK_OUTPUTS | jq -r '.[] | select(.OutputKey=="ALBDnsName") | .OutputValue // empty')
+          PROD_PORT=$(echo $STACK_OUTPUTS | jq -r '.[] | select(.OutputKey=="ProductionUrl") | .OutputValue | split(":")[2] // "80"')
+          TEST_PORT=$(echo $STACK_OUTPUTS | jq -r '.[] | select(.OutputKey=="TestUrl") | .OutputValue | split(":")[2] // "8080"')
+
+          # Validate required outputs for URLs
+          if [ -z "$ALB_DNS" ] || [ "$ALB_DNS" == "null" ]; then echo "Error: Staging ALBDnsName not found." && exit 1; fi
+          if [ -z "$PROD_PORT" ] || [ "$PROD_PORT" == "null" ]; then echo "Error: Staging ProductionUrl not found." && exit 1; fi
+          if [ -z "$TEST_PORT" ] || [ "$TEST_PORT" == "null" ]; then echo "Error: Staging TestUrl not found." && exit 1; fi
+
+          # Generate outputs of the next jobs
           echo "cluster_name=${CLUSTER_NAME}" >> $GITHUB_OUTPUT
           echo "service_name=${SERVICE_NAME}" >> $GITHUB_OUTPUT
-          echo "alb_url=http://${ALB_DNS}" >> $GITHUB_OUTPUT
-          echo "Staging Outputs Set: Cluster=${CLUSTER_NAME}, Service=${SERVICE_NAME}, URL=http://${ALB_DNS}/"
+          echo "alb_url_80=http://${ALB_DNS}:${PROD_PORT:-80}" >> $GITHUB_OUTPUT # URL Principal (Blue TG)
+          echo "alb_url_8080=http://${ALB_DNS}:${TEST_PORT:-8080}" >> $GITHUB_OUTPUT # URL Test (Green TG)
+          echo "Staging Outputs Set."
 
-  # --- Job 6: Update Staging Service & Force New Deployment ---
-  update-service-staging:
-    name: Update Staging Service
-    needs: [deploy-cfn-staging]
-    runs-on: ubuntu-24.04
-    environment: staging
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-
-    steps:
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4.1.0
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: us-east-1
-
-      - name: Force New Deployment ECS Service Staging & Wait
-        run: |
-          echo "Forcing new deployment for Staging service..."
-          CLUSTER_NAME="${{ needs.deploy-cfn-staging.outputs.cluster_name_staging }}"
-          SERVICE_NAME="${{ needs.deploy-cfn-staging.outputs.service_name_staging }}"
-          echo "Updating Staging Service: Cluster=$CLUSTER_NAME, Service=$SERVICE_NAME"
-          aws ecs update-service --cluster $CLUSTER_NAME \
-                                --service $SERVICE_NAME \
-                                --force-new-deployment \
-                                --region us-east-1
-          echo "Waiting for Staging service deployment to stabilize..."
-          aws ecs wait services-stable --cluster $CLUSTER_NAME --services $SERVICE_NAME --region us-east-1
-          echo "Staging service deployment stable."
-
-  # --- Job 7: Run Acceptance Tests on Staging ---
+  # --- Job 6: Run Acceptance Tests on Staging (Green TG) ---
   test-staging:
     name: Run Acceptance Tests on Staging
-    needs: [update-service-staging, deploy-cfn-staging]
+    needs: [deploy-cfn-staging]
     runs-on: ubuntu-24.04
     environment: staging
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -336,29 +321,35 @@ jobs:
           npm ci
           npm run test:e2e:setup
 
-      - name: Run Acceptance Tests against Staging
+      - name: Run Acceptance Tests against Staging Green Target
         env:
-          APP_BASE_URL: ${{ needs.deploy-cfn-staging.outputs.alb_url_staging }}
+          APP_BASE_URL: ${{ needs.deploy-cfn-staging.outputs.alb_url_staging_8080 }}
         run: |
-          echo "Running acceptance tests against Staging : $APP_BASE_URL..."
+          echo "Running acceptance tests against Staging Green Target: $APP_BASE_URL..."
           sleep 30 # Give ALB time to register healthy targets
           npm run test:acceptance
 
-  # --- Job 8: Deploy Infrastructure to Production ---
+  # --- Job 7: Deploy/Update Production Infrastructure & Wait ---
   deploy-cfn-prod:
-    name: Deploy to Production
+    name: Deploy Production
     needs: [docker-build-scan-push, test-staging]
     runs-on: ubuntu-24.04
     environment:
       name: production
-      url: ${{ steps.get_cfn_outputs_prod.outputs.alb_url }}
+      url: ${{ steps.get_cfn_outputs_prod.outputs.production_url }}
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     outputs:
-      alb_url_prod: ${{ steps.get_cfn_outputs_prod.outputs.alb_url }}
       cluster_name_prod: ${{ steps.get_cfn_outputs_prod.outputs.cluster_name }}
       service_name_prod: ${{ steps.get_cfn_outputs_prod.outputs.service_name }}
-      deploying_task_def_arn_prod: ${{ steps.get_cfn_outputs_prod.outputs.task_def_arn }}
-      previous_task_def_arn_prod: ${{ steps.get_previous_task_def.outputs.previous_task_def_arn }}
+      listener_prod_arn_prod: ${{ steps.get_cfn_outputs_prod.outputs.listener_prod_arn  }}
+      listener_test_arn_prod: ${{ steps.get_cfn_outputs_prod.outputs.listener_test_arn }}
+      tg_blue_arn_prod: ${{ steps.get_cfn_outputs_prod.outputs.tg_blue_arn }}
+      tg_green_arn_prod: ${{ steps.get_cfn_outputs_prod.outputs.tg_green_arn }}
+      task_family_prod: ${{ steps.get_cfn_outputs_prod.outputs.task_family }}
+      currently_active_tg_arn_prod: ${{ steps.get_cfn_outputs_prod.outputs.currently_active_tg_arn }} # TG activo ANTES
+      production_url_prod: ${{ steps.get_cfn_outputs_prod.outputs.production_url }}
+      test_url_prod: ${{ steps.get_cfn_outputs_prod.outputs.test_url }} # URL para probar Green TG
+      #deployed_task_def_arn_prod: ${{ steps.wait_and_get_outputs_prod.outputs.deployed_task_def_arn }}
 
     steps:
       - name: Checkout Code
@@ -372,33 +363,18 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: us-east-1
 
-      - name: Get Current Stable Production Task Definition ARN (for rollback)
-        id: get_previous_task_def
+      - name: Deploy CFN Production Stack
+        id: deploy_cfn_prod
         run: |
-          # Get the cluster and service names from the production stack
-          CLUSTER_NAME_QUERY=$(aws cloudformation describe-stacks --stack-name todo-app-prod-stack --query "Stacks[0].Outputs[?OutputKey=='ECSClusterName'].OutputValue" --output text --region us-east-1 2>/dev/null || echo "NOT_FOUND")
-          SERVICE_NAME_QUERY=$(aws cloudformation describe-stacks --stack-name todo-app-prod-stack --query "Stacks[0].Outputs[?OutputKey=='ECSServiceName'].OutputValue" --output text --region us-east-1 2>/dev/null || echo "NOT_FOUND")
-
-          if [ "$CLUSTER_NAME_QUERY" == "NOT_FOUND" ] || [ "$SERVICE_NAME_QUERY" == "NOT_FOUND" ]; then
-            echo "Production stack/service not found or first deployment. Setting previous ARN to NONE."
-            echo "previous_task_def_arn=NONE" >> $GITHUB_OUTPUT
-          else
-            PREVIOUS_TASK_DEF_ARN=$(aws ecs describe-services --cluster "$CLUSTER_NAME_QUERY" --services "$SERVICE_NAME_QUERY" --query "services[0].taskDefinition" --output text --region us-east-1)
-            if [ -z "$PREVIOUS_TASK_DEF_ARN" ]; then
-               echo "Warning: Could not get previous task definition ARN. Setting to NONE."
-               echo "previous_task_def_arn=NONE" >> $GITHUB_OUTPUT
-            else
-               echo "Previous stable Task Definition ARN: $PREVIOUS_TASK_DEF_ARN"
-               echo "previous_task_def_arn=$PREVIOUS_TASK_DEF_ARN" >> $GITHUB_OUTPUT
-            fi
-          fi
-
-      - name: Deploy/Update CloudFormation Production Stack
-        run: |
-          # echo "Deploying CloudFormation stack for Deploy... Using the same tag sha deployed in STG"
+          echo "Deploying CloudFormation stack for Production... Using the same tag sha deployed in STG"
           IMAGE_NAME="${{ secrets.DOCKERHUB_USERNAME }}/${{ needs.docker-build-scan-push.outputs.repo_name }}"
-          IMAGE_TAG="${{ needs.docker-build-scan-push.outputs.image_tag_sha }}"
-          IMAGE_URI="${IMAGE_NAME}:${IMAGE_TAG}"
+          IMAGE_TAG_SHA="${{ needs.docker-build-scan-push.outputs.image_tag_sha }}"
+
+          # Verify that the image name and tag are not empty
+          if [ -z "$IMAGE_NAME" ]; then echo "::error::Image Name output from previous job is empty!" && exit 1; fi
+          if [ -z "$IMAGE_TAG_SHA" ]; then echo "::error::Image Tag SHA output from previous job is empty!" && exit 1; fi
+
+          IMAGE_URI="${IMAGE_NAME}:${IMAGE_TAG_SHA}"
           echo "Deploying Image URI to Production: $IMAGE_URI"
 
           aws cloudformation deploy \
@@ -413,74 +389,79 @@ jobs:
               --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
               --no-fail-on-empty-changes \
               --region us-east-1
+          echo "CloudFormation deploy command finished for Production."
 
-      - name: Get Production Stack Outputs and New Task Definition
+      - name: Wait Production Service Stability & Get Outputs/State
         # Only runs if the previous step (CFN Prod) was successful
         id: get_cfn_outputs_prod
+        if: steps.deploy_cfn_prod.outcome == 'success'
         run: |
           echo "Fetching Production stack outputs..."
+          # Install jq if needed
           if ! command -v jq &> /dev/null; then sudo apt-get update && sudo apt-get install -y jq; fi
-          STACK_OUTPUTS=$(aws cloudformation describe-stacks --stack-name todo-app-prod-stack --query "Stacks[0].Outputs" --region us-east-1 --output json)
+          STACK_NAME="todo-app-prod-stack"
+          STACK_OUTPUTS=$(aws cloudformation describe-stacks --stack-name $STACK_NAME --query "Stacks[0].Outputs" --region us-east-1 --output json)
           echo "Raw Production Stack Outputs: $STACK_OUTPUTS"
 
           CLUSTER_NAME=$(echo $STACK_OUTPUTS | jq -r '.[] | select(.OutputKey=="ECSClusterName") | .OutputValue')
           SERVICE_NAME=$(echo $STACK_OUTPUTS | jq -r '.[] | select(.OutputKey=="ECSServiceName") | .OutputValue')
-          ALB_DNS=$(echo $STACK_OUTPUTS | jq -r '.[] | select(.OutputKey=="ALBDnsName") | .OutputValue')
-
-          if [ -z "$ALB_DNS" ] || [ "$ALB_DNS" == "null" ]; then echo "Error: Production ALBDnsName not found." && exit 1; fi
           if [ -z "$CLUSTER_NAME" ] || [ "$CLUSTER_NAME" == "null" ]; then echo "Error: Production ECSClusterName not found." && exit 1; fi
           if [ -z "$SERVICE_NAME" ] || [ "$SERVICE_NAME" == "null" ]; then echo "Error: Production ECSServiceName not found." && exit 1; fi
 
-          echo "cluster_name=${CLUSTER_NAME}" >> $GITHUB_OUTPUT
-          echo "service_name=${SERVICE_NAME}" >> $GITHUB_OUTPUT
-          echo "alb_url=http://${ALB_DNS}" >> $GITHUB_OUTPUT
-          echo "Production Outputs Set: Cluster=${CLUSTER_NAME}, Service=${SERVICE_NAME}, URL=http://${ALB_DNS}/"
+          echo "Waiting for service '$SERVICE_NAME' in cluster '$CLUSTER_NAME' to stabilize..."
+          # Add timeout
+          aws ecs wait services-stable --cluster $CLUSTER_NAME --services $SERVICE_NAME --region us-east-1 || \
+            (echo "::error::ECS service failed to stabilize in Production!" && exit 1)
+          echo "Production ECS service is stable."
 
-          # Obtener el ARN de la Task Def que CFN ACABA de configurar
-          TASK_DEF_ARN=$(aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$SERVICE_NAME" --query "services[0].taskDefinition" --output text --region us-east-1)
-          if [ -z "$TASK_DEF_ARN" ]; then echo "::error::Could not get NEW Task Definition ARN for production service." && exit 1; fi
-          echo "Production Task Definition ARN for this deployment: $TASK_DEF_ARN"
-          # ... (echo outputs a GITHUB_OUTPUT, incluyendo task_def_arn) ...
-          echo "task_def_arn=${TASK_DEF_ARN}" >> $GITHUB_OUTPUT
+          # Get Outputs 
+          ALB_DNS=$(echo $STACK_OUTPUTS | jq -r '.[] | select(.OutputKey=="ALBDnsName") | .OutputValue')
+          LISTENER_PROD_ARN=$(echo $STACK_OUTPUTS | jq -r '.[] | select(.OutputKey=="ListenerArnProd") | .OutputValue')
+          LISTENER_TEST_ARN=$(echo $STACK_OUTPUTS | jq -r '.[] | select(.OutputKey=="ListenerArnTest") | .OutputValue') # Output del Listener de Test (8080)
+          TG_BLUE_ARN=$(echo $STACK_OUTPUTS | jq -r '.[] | select(.OutputKey=="TargetGroupArnBlue") | .OutputValue')
+          TG_GREEN_ARN=$(echo $STACK_OUTPUTS | jq -r '.[] | select(.OutputKey=="TargetGroupArnGreen") | .OutputValue')
+          ALB_DNS=$(echo $STACK_OUTPUTS | jq -r '.[] | select(.OutputKey=="ALBDnsName") | .OutputValue // empty')
+          PROD_PORT=$(echo $STACK_OUTPUTS | jq -r '.[] | select(.OutputKey=="ProductionUrl") | .OutputValue | split(":")[2] // "80"')
+          TEST_PORT=$(echo $STACK_OUTPUTS | jq -r '.[] | select(.OutputKey=="TestUrl") | .OutputValue | split(":")[2] // "8080"')
 
-  # --- Job 9: Update Production Service & Force New Deployment ---
-  update-service-prod:
-    name: Update Production Service
-    needs: [docker-build-scan-push, deploy-cfn-prod]
-    runs-on: ubuntu-24.04
-    environment: production
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+          # Validate key outputs
+          for val_key in LISTENER_PROD_ARN LISTENER_TEST_ARN TG_BLUE_ARN TG_GREEN_ARN ALB_DNS PROD_PORT TEST_PORT; do
+              val=$(eval echo "\$$val_key") # Obtener valor de la variable
+              if [ -z "$val" ] || [ "$val" == "null" ]; then echo "::error::Failed to get output $val_key from stack $STACK_NAME" && exit 1; fi
+          done
 
-    steps:
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4.1.0
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: us-east-1
+          # --- Guardar ARN Estable en SSM (Opcional pero buena práctica) ---
+          STABLE_TASK_DEF_ARN=$(aws ecs describe-services --cluster "$CLUSTER_NAME" --services "$SERVICE_NAME" --query "services[0].taskDefinition" --output text --region us-east-1)
+          PARAMETER_NAME="/todo-app/prod/stable-task-definition-arn"
+          if [ -n "$STABLE_TASK_DEF_ARN" ] && [ "$STABLE_TASK_DEF_ARN" != "null" ]; then
+              echo "Storing stable Task Definition ARN $STABLE_TASK_DEF_ARN in SSM parameter: $PARAMETER_NAME"
+              aws ssm put-parameter --name "$PARAMETER_NAME" --value "$STABLE_TASK_DEF_ARN" --type String --overwrite --region us-east-1 || \
+                echo "::warning::Failed to store Task Definition ARN in SSM."
+          else
+              echo "::warning::Could not get stable task definition ARN after deployment. Cannot record stable deployment for future rollback via SSM."
+          fi
+          #echo "deployed_task_def_arn=${STABLE_TASK_DEF_ARN:-NONE}" >> $GITHUB_OUTPUT
 
-      - name: Force New Deployment ECS Service Production & Wait
-        run: |
-          echo "Forcing new deployment for Production service..."
-          CLUSTER_NAME="${{ needs.deploy-cfn-prod.outputs.cluster_name_prod }}"
-          SERVICE_NAME="${{ needs.deploy-cfn-prod.outputs.service_name_prod }}"
-          TASK_DEF_ARN="${{ needs.deploy-cfn-prod.outputs.deploying_task_def_arn_prod }}"
+          echo "Determining active target group for Production Listener ($LISTENER_PROD_ARN)..."
+          CURRENTLY_ACTIVE_TG_ARN=$(aws elbv2 describe-listeners --listener-arns $LISTENER_PROD_ARN --query 'Listeners[0].DefaultActions[0].TargetGroupArn' --output text --region us-east-1)
+          echo "Currently active TG ARN: $CURRENTLY_ACTIVE_TG_ARN"
 
-          echo "Updating Production Service: Cluster=$CLUSTER_NAME, Service=$SERVICE_NAME"
-          aws ecs update-service --cluster $CLUSTER_NAME \
-                                --service $SERVICE_NAME \
-                                --task-definition "$TASK_DEF_ARN" \
-                                --force-new-deployment \
-                                --region us-east-1
-          echo "Waiting for Production service deployment to stabilize..."
-          aws ecs wait services-stable --cluster $CLUSTER_NAME --services $SERVICE_NAME --region us-east-1
-          echo "Production service deployment stable."
+          # Generate outputs of the next jobs
+          echo "cluster_name=$CLUSTER_NAME" >> $GITHUB_OUTPUT
+          echo "service_name=$SERVICE_NAME" >> $GITHUB_OUTPUT
+          echo "listener_prod_arn=$LISTENER_PROD_ARN" >> $GITHUB_OUTPUT
+          echo "listener_test_arn=$LISTENER_TEST_ARN" >> $GITHUB_OUTPUT
+          echo "tg_blue_arn=$TG_BLUE_ARN" >> $GITHUB_OUTPUT
+          echo "tg_green_arn=$TG_GREEN_ARN" >> $GITHUB_OUTPUT
+          echo "currently_active_tg_arn=$CURRENTLY_ACTIVE_TG_ARN" >> $GITHUB_OUTPUT
+          echo "production_url=http://${ALB_DNS}:${PROD_PORT:-80}" >> $GITHUB_OUTPUT
+          echo "test_url=http://${ALB_DNS}:${TEST_PORT:-8080}" >> $GITHUB_OUTPUT
+          echo "Production Outputs & State Set."
 
-  # --- Job 10: Run Smoke Tests on Production ---
+  # --- Job 8: Run Smoke Tests on Production (Green Target) ---
   smoke-test-prod:
-    name: Run Smoke Tests on Production
-    needs: [update-service-prod, deploy-cfn-prod]
+    name: Run Smoke Tests on Production (Green TG)
+    needs: [deploy-cfn-prod]
     runs-on: ubuntu-24.04
     environment: production
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -500,22 +481,22 @@ jobs:
           npm ci
           npm run test:e2e:setup
 
-      - name: Run Smoke Tests against Production
+      - name: Run Smoke Tests against Production Green Target
         env:
-          APP_BASE_URL: ${{ needs.deploy-cfn-prod.outputs.alb_url_prod }}
+          # Use URL 8080 (Green TG) from the previous job
+          APP_BASE_URL: ${{ needs.deploy-cfn-prod.outputs.test_url_prod }}
         run: |
           echo "Running smoke tests against Production : $APP_BASE_URL..."
           sleep 30 # Give ALB time to register healthy targets
           npm run test:smoke
 
-  # --- Job 11: Initiate Rollback Production if Smoke Tests got failure- ---
-  rollback-prod:
-    name: Rollback Production Deployment
+  # --- Job 9: Promote Production (Switch Traffic) ---
+  promote-prod:
+    name: Promote Production (Switch Listeners)
     needs: [smoke-test-prod, deploy-cfn-prod]
-    runs-on: ubuntu-24.04
-    environment: production
-    # This job will only run if the previous job (smoke-test-prod) fails
-    if: failure() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production # MANUAL APPROVAL could act here..
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
       - name: Configure AWS Credentials
@@ -526,74 +507,122 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: us-east-1
 
-      - name: Initiate Rollback Based on Previous Stable Task Definition
+      - name: Switch Production Listener Traffic to Green TG
+        id: switch_prod
         run: |
-          # To get the necessary data from previous jobs.
-          CLUSTER_NAME="${{ needs.deploy-cfn-prod.outputs.cluster_name_prod }}"
-          SERVICE_NAME="${{ needs.deploy-cfn-prod.outputs.service_name_prod }}"
-          PREVIOUS_STABLE_TASK_DEF_ARN="${{ needs.deploy-cfn-prod.outputs.previous_task_def_arn_prod }}"
-
-          echo "::warning::Smoke tests failed! Initiating rollback procedure..."
-          if [ "$PREVIOUS_STABLE_TASK_DEF_ARN" == "NONE" ]; then
-            echo "::error::CRITICAL: Previous stable task definition ARN ('$PREVIOUS_STABLE_TASK_DEF_ARN') is not available. Cannot perform automated rollback." 
-            exit 1
+          echo "Promoting GREEN Target Group to production..."
+          LISTENER_PROD_ARN="${{ needs.deploy-cfn-prod.outputs.listener_prod_arn_prod }}"
+          TARGET_TG_ARN="${{ needs.deploy-cfn-prod.outputs.tg_green_arn_prod }}"
+          echo "Switching Listener $LISTENER_ARN default action to forward to Green Target Group $GREEN_TG_ARN"
+          CURRENT_TG=$(aws elbv2 describe-listeners --listener-arns $LISTENER_PROD_ARN --query 'Listeners[0].DefaultActions[0].TargetGroupArn' --output text --region us-east-1)
+          if [ "$CURRENT_TG" == "$TARGET_TG_ARN" ]; then
+              echo "Production Listener $LISTENER_PROD_ARN already points to Green TG $TARGET_TG_ARN."
+          else
+              echo "Modifying Production Listener '$LISTENER_PROD_ARN' -> GREEN Target Group '$TARGET_TG_ARN'..."
+              aws elbv2 modify-listener \
+                --listener-arn $LISTENER_PROD_ARN \
+                --default-actions Type=forward,TargetGroupArn=$TARGET_TG_ARN \
+                --region us-east-1 || exit 1 # Salir si falla el cambio
+              echo "Production listener modified. GREEN TG is now LIVE."
+              echo "Waiting briefly..."
+              sleep 30 # Espera corta post-cambio
           fi
 
-          echo "Rolling back Production service to Task Definition: $PREVIOUS_STABLE_TASK_DEF_ARN"
+      - name: Switch Test Listener to BLUE TG
+        id: switch_test
+        # Run only if prod switch was successful
+        if: steps.switch_prod.outcome == 'success'
+        run: |
+          echo "Switching Test Listener traffic to the (now inactive) BLUE Target Group..."
+          LISTENER_TEST_ARN="${{ needs.deploy-cfn-prod.outputs.listener_test_arn_prod }}"
+          TARGET_TG_ARN="${{ needs.deploy-cfn-prod.outputs.tg_blue_arn_prod }}" # Apuntar Test a Blue
 
-          # 1. Describe la definición de tarea BUENA ANTERIOR para obtener su JSON
-          echo "Describing previous stable task definition: $PREVIOUS_STABLE_TASK_DEF_ARN"
-          TASK_DEFINITION_JSON=$(aws ecs describe-task-definition --task-definition "$PREVIOUS_STABLE_TASK_DEF_ARN" --query 'taskDefinition' --output json --region us-east-1)
-
-          if [ -z "$TASK_DEFINITION_JSON" ] || [ "$TASK_DEFINITION_JSON" == "null" ]; then
-            echo "::error::Failed to describe previous stable task definition $PREVIOUS_STABLE_TASK_DEF_ARN. It might have been deleted or is inaccessible."
-            exit 1
+          CURRENT_TG=$(aws elbv2 describe-listeners --listener-arns $LISTENER_TEST_ARN --query 'Listeners[0].DefaultActions[0].TargetGroupArn' --output text --region us-east-1)
+          if [ "$CURRENT_TG" == "$TARGET_TG_ARN" ]; then
+              echo "Test Listener $LISTENER_TEST_ARN already points to Blue TG $TARGET_TG_ARN."
+          else
+              echo "Modifying Test Listener '$LISTENER_TEST_ARN' -> BLUE Target Group '$TARGET_TG_ARN'..."
+              aws elbv2 modify-listener \
+                --listener-arn $LISTENER_TEST_ARN \
+                --default-actions Type=forward,TargetGroupArn=$TARGET_TG_ARN \
+                --region us-east-1 || (echo "::error:: Failed to switch Test Listener $LISTENER_TEST_ARN to Blue TG $TARGET_TG_ARN!" && exit 1) # || echo "::warning:: Failed to switch Test Listener to Blue TG." # Advertir pero no fallar el job
+              echo "Test listener modification attempt finished."
           fi
 
-          # 2. Prepara el JSON para registrar una NUEVA revisión basada en la anterior
-          #    Eliminando campos que no se permiten en register-task-definition
-          echo "Preparing JSON for new task definition based on $PREVIOUS_STABLE_TASK_DEF_ARN..."
-          if ! command -v jq &> /dev/null; then sudo apt-get update && sudo apt-get install -y jq; fi
+  # --- Job 10: Initiate Rollback Production Listeners if Smoke Tests got failure- ---
+  rollback-prod:
+    name: Rollback Production Deployment
+    needs: [smoke-test-prod, deploy-cfn-prod]
+    runs-on: ubuntu-24.04
+    environment: production
+    # This job will only run if the previous job (smoke-test-prod) fails
+    if: always() && needs.smoke-test-prod.result == 'failure' && github.event_name == 'push' && github.ref == 'refs/heads/main'
 
-          # Quitamos los campos no necesarios y MANTENEMOS la imagen original 
-          NEW_TASK_DEF_INPUT=$(echo $TASK_DEFINITION_JSON | jq '
-            del(.taskDefinitionArn) |
-            del(.revision) |
-            del(.status) |
-            del(.requiresAttributes) |
-            del(.compatibilities) |
-            del(.registeredAt) |
-            del(.registeredBy) |
-            del(.deregisteredAt) 
-          ')
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
 
-          if [ -z "$NEW_TASK_DEF_INPUT" ]; then echo "::error::Error preparing new task definition JSON for rollback." && exit 1; fi
-          # echo "Registering Task Definition with payload: $NEW_TASK_DEF_INPUT" # Debug
+      - name: Revert/Set Production & Test Listeners
+        run: |
+          echo "::warning:: A failure occurred during testing or promotion! Initiating listener rollback..."
+          LISTENER_PROD_ARN="${{ needs.deploy-cfn-prod.outputs.listener_prod_arn_prod }}"
+          LISTENER_TEST_ARN="${{ needs.deploy-cfn-prod.outputs.listener_test_arn_prod }}"
+          # El TG que estaba activo ANTES del despliegue actual (obtenido en deploy-prod)
+          STABLE_PROD_TG_ARN="${{ needs.deploy-cfn-prod.outputs.currently_active_tg_arn_prod }}"
+          # Fallbacks seguros
+          BLUE_TG_ARN="${{ needs.deploy-cfn-prod.outputs.tg_blue_arn_prod }}"
+          GREEN_TG_ARN="${{ needs.deploy-cfn-prod.outputs.tg_green_arn_prod }}"
 
-          # 3. Registra la NUEVA revisión, que es una copia ACTIVA de la anterior
-          echo "Registering new task definition based on previous stable version..."
-          REGISTER_OUTPUT=$(aws ecs register-task-definition --cli-input-json "$NEW_TASK_DEF_INPUT" --region us-east-1)
-          ROLLBACK_TASK_DEF_ARN=$(echo $REGISTER_OUTPUT | jq -r '.taskDefinition.taskDefinitionArn')
-
-          if [ -z "$ROLLBACK_TASK_DEF_ARN" ] || [ "$ROLLBACK_TASK_DEF_ARN" == "null" ]; then
-             echo "::error::Error registering rollback task definition."
-             exit 1
+          # 1. Determinar a dónde debe apuntar el Listener de Producción (el último estado estable conocido)
+          FINAL_PROD_TARGET_TG=$STABLE_PROD_TG_ARN
+          if [ -z "$FINAL_PROD_TARGET_TG" ] || [ "$FINAL_PROD_TARGET_TG" == "null" ] ; then
+              # Fallback a Blue SOLO si no pudimos obtener el ARN previo
+              echo "::warning:: Could not determine the previously active TG ARN for Prod Listener. Defaulting Prod Listener to BLUE TG for safety."
+              FINAL_PROD_TARGET_TG=$BLUE_TG_ARN
           fi
-          echo "Successfully registered Rollback Task Definition: $ROLLBACK_TASK_DEF_ARN"
 
-          # 4. Actualiza el servicio para usar la NUEVA revisión registrada basada en la revisión estable anterior
-          echo "Updating service $SERVICE_NAME to use Rollback Task Definition $ROLLBACK_TASK_DEF_ARN..."
-          aws ecs update-service --cluster "$CLUSTER_NAME" \
-                                 --service "$SERVICE_NAME" \
-                                 --task-definition "$ROLLBACK_TASK_DEF_ARN" \
-                                 --force-new-deployment \
-                                 --region us-east-1
+          # 2. Determinar a dónde debe apuntar el Listener de Test (Prueba) (el TG opuesto al de producción después del rollback)
+          TARGET_TEST_TG_ARN=""
+          if [ "$FINAL_PROD_TARGET_TG" == "$BLUE_TG_ARN" ]; then
+              TARGET_TEST_TG_ARN=$GREEN_TG_ARN
+              echo "Rollback State Target: Prod Listener -> Blue TG, Test Listener -> Green TG"
+          elif [ "$FINAL_PROD_TARGET_TG" == "$GREEN_TG_ARN" ]; then
+              TARGET_TEST_TG_ARN=$BLUE_TG_ARN
+              echo "Rollback State Target: Prod Listener -> Green TG, Test Listener -> Blue TG"
+          else
+              # Esto no debería pasar si la validación anterior funciona, pero por si acaso
+              echo "::error:: CRITICAL: Cannot determine a valid Production TG target for rollback. Cannot reliably set Test Listener."
+              # Intentar poner Test en Green como medida desesperada? O mejor fallar? Fallar es más seguro.
+              exit 1
+          fi
 
-          # 5. Espera a que el rollback se estabilice
-          echo "Waiting for rollback deployment to stabilize..."
-          aws ecs wait services-stable --cluster "$CLUSTER_NAME" --services "$SERVICE_NAME" --region us-east-1
-          echo "Service $SERVICE_NAME rollback attempt finished."
-          echo "Service is now configured to run Task Definition: $ROLLBACK_TASK_DEF_ARN (originally based on $PREVIOUS_STABLE_TASK_DEF_ARN)."
+          # Validar ARNs necesarios antes de modificar
+          if [ -z "$LISTENER_PROD_ARN" ] || [ -z "$LISTENER_TEST_ARN" ] || [ -z "$FINAL_PROD_TARGET_TG" ] || [ -z "$TARGET_TEST_TG_ARN" ] ; then
+              echo "::error:: CRITICAL: Missing essential ARNs for rollback modifications. Manual intervention required."
+              exit 1
+          fi
 
-          echo "::error::Pipeline finished with rollback due to smoke test failure."
-          exit 1
+          # 3. Modificar Listener de Producción
+          echo "Attempting to set Production Listener '$LISTENER_PROD_ARN' -> Target Group '$FINAL_PROD_TARGET_TG'..."
+          aws elbv2 modify-listener \
+            --listener-arn "$LISTENER_PROD_ARN" \
+            --default-actions Type=forward,TargetGroupArn="$FINAL_PROD_TARGET_TG" \
+            --region us-east-1 && echo "Production Listener set." || \
+            echo "::warning:: Failed to set Production Listener during rollback."
+
+          # 4. Modificar Listener de Prueba
+          echo "Attempting to set Test Listener '$LISTENER_TEST_ARN' -> Target Group '$TARGET_TEST_TG_ARN'..."
+          # Hacer que falle el paso si este comando falla, es crítico para el siguiente deploy
+          aws elbv2 modify-listener \
+            --listener-arn "$LISTENER_TEST_ARN" \
+            --default-actions Type=forward,TargetGroupArn="$TARGET_TEST_TG_ARN" \
+            --region us-east-1 || (echo "::error:: Failed to set Test Listener during rollback!" && exit 1)
+          echo "Test Listener set."
+
+          echo "::error:: Pipeline finished with failure after rollback attempt."
+          exit 1 # Falla el pipeline explícitamente
